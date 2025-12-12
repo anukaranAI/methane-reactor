@@ -22,9 +22,7 @@ st.set_page_config(
 # API CONFIGURATION
 # ============================================================================
 
-# !!! SECURITY WARNING !!!
-# On EC2, it is better to set this as an Environment Variable.
-# For now, paste your key here.
+# !!! SECURITY WARNING: Do not commit this key to GitHub !!!
 GEMINI_API_KEY = "AIzaSyDTJGfbX8BrxLrNpk6OYQbAVb7_eiIB5Us" 
 
 # ============================================================================
@@ -37,7 +35,7 @@ MW_C = 12.01e-3
 MW_N2 = 28.01e-3
 
 # ============================================================================
-# AI ASSISTANT LOGIC (Stable Version)
+# AI ASSISTANT LOGIC (ROBUST AUTO-DETECT VERSION)
 # ============================================================================
 class GeminiAssistant:
     def __init__(self, api_key):
@@ -51,12 +49,40 @@ class GeminiAssistant:
         try:
             genai.configure(api_key=api_key)
             
-            # Simple fallback logic for Streamlit speed
-            # We prefer the 1.5 Flash model for speed/cost
-            target_model = "gemini-1.5-flash"
+            # --- ROBUST MODEL DETECTION (Added to fix 404 error) ---
+            # 1. Get list of all models available to your key
+            all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            available_names = [m.replace("models/", "") for m in all_models]
             
-            self.model = genai.GenerativeModel(target_model)
-            self.model_available = True
+            # 2. Define preference list (Stable models first)
+            # This ensures we pick 'gemini-flash-latest' if 'gemini-1.5-flash' fails
+            preferred_order = [
+                "gemini-1.5-flash",
+                "gemini-flash-latest", # <--- This is likely the one that works for you
+                "gemini-1.5-pro",
+                "gemini-pro",
+                "gemini-2.0-flash",    # Fallback
+            ]
+
+            target_model = None
+
+            # 3. Find best match
+            for preferred in preferred_order:
+                if preferred in available_names:
+                    target_model = preferred
+                    break
+            
+            # 4. Fallback
+            if not target_model and available_names:
+                target_model = available_names[0]
+            
+            if target_model:
+                # st.toast(f"AI Connected: {target_model}") # Optional: Show user which model connected
+                self.model = genai.GenerativeModel(target_model)
+                self.model_available = True
+            else:
+                st.error("❌ No text generation models found for this API key.")
+                self.model_available = False
             
         except Exception as e:
             st.error(f"❌ AI Config Error: {e}")
@@ -77,11 +103,11 @@ class GeminiAssistant:
             return response.text
         except Exception as e:
             if "429" in str(e):
-                return "⚠️ Quota Limit Exceeded. Please wait a moment."
+                return "⚠️ Quota Limit Exceeded. Please wait 30 seconds."
             return f"Error: {e}"
 
 # ============================================================================
-# REACTOR LOGIC (Original Classes)
+# REACTOR LOGIC (Standard)
 # ============================================================================
 @dataclass
 class ReactorConfig:
