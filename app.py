@@ -233,7 +233,7 @@ def handle_ai_request(prompt_text):
     st.session_state.chat_history.append({"role": "assistant", "content": response})
 
 # --- Header (LOGO ADDED HERE) ---
-st.image("https://raw.githubusercontent.com/anukaranAI/methane-reactor/main/AnukaranLogo.png", width=500)
+st.image("https://raw.githubusercontent.com/anukaranAI/methane-reactor/main/AnukaranNew7.png", width=500)
 st.markdown("### Methane Decomposition Reactor Simulator | Full Physics Engine")
 st.markdown("---")
 
