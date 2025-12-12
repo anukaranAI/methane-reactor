@@ -21,10 +21,11 @@ st.set_page_config(
 # ============================================================================
 # API CONFIGURATION
 # ============================================================================
+# !!! SECURITY WARNING: Do not commit this key to GitHub !!!
 GEMINI_API_KEY = "AIzaSyDTJGfbX8BrxLrNpk6OYQbAVb7_eiIB5Us" 
 
 # ============================================================================
-# PHYSICAL CONSTANTS & HELPER FUNCTIONS
+# PHYSICAL CONSTANTS & HELPER FUNCTIONS (From Desktop App)
 # ============================================================================
 R_GAS = 8.314
 MW_CH4 = 16.04e-3
@@ -65,7 +66,7 @@ def ergun_pressure_drop(u, rho, mu, d_p, eps):
     return term1 + term2
 
 # ============================================================================
-# AI ASSISTANT LOGIC (Robust Auto-Detect)
+# AI ASSISTANT LOGIC (Robust Auto-Detect + Action Buttons)
 # ============================================================================
 class GeminiAssistant:
     def __init__(self, api_key):
@@ -111,7 +112,7 @@ class GeminiAssistant:
             return f"Error: {e}"
 
 # ============================================================================
-# REACTOR LOGIC
+# REACTOR LOGIC (Matches Desktop App)
 # ============================================================================
 @dataclass
 class ReactorConfig:
@@ -236,42 +237,51 @@ st.title("🔬 ANUKARAN AI")
 st.markdown("### Methane Decomposition Reactor Simulator | Full Physics Engine")
 st.markdown("---")
 
-# --- Sidebar Inputs (ALL restored) ---
+# --- Sidebar Inputs (MATCHING DESKTOP APP EXACTLY) ---
 with st.sidebar:
     st.header("⚙️ Input Parameters")
     
-    st.subheader("📐 Geometry")
-    d_reac = st.number_input("Reactor Diameter (cm)", 1.0, 100.0, 5.0)
-    h_bed = st.number_input("Bed Height (cm)", 1.0, 500.0, 20.0)
+    # 1. Reactor Geometry
+    st.markdown("#### 📐 Reactor Geometry")
+    d_reac = st.number_input("Reactor Diameter (cm)", 0.1, 500.0, 5.0)
+    h_bed = st.number_input("Bed Height (cm)", 0.1, 1000.0, 20.0)
+    # This was in the desktop GUI list but typically not used in calculation class, included for completeness
+    h_total = st.number_input("Total Reactor Height (cm)", 0.1, 1000.0, 30.0)
     
-    st.subheader("🧪 Catalyst")
-    d_part = st.number_input("Particle Diameter (μm)", 10.0, 5000.0, 500.0)
-    rho_cat = st.number_input("Density (kg/m³)", 500.0, 5000.0, 2000.0)
+    # 2. Catalyst Properties
+    st.markdown("#### 🧪 Catalyst Properties")
+    d_part = st.number_input("Particle Diameter (μm)", 1.0, 10000.0, 500.0)
+    rho_cat = st.number_input("Catalyst Density (kg/m³)", 100.0, 10000.0, 2000.0)
     eps_part = st.number_input("Particle Porosity", 0.0, 1.0, 0.5)
     tau = st.number_input("Tortuosity", 1.0, 10.0, 3.0)
-    eps_bed = st.number_input("Bed Porosity", 0.1, 0.9, 0.4)
-    mass_cat = st.number_input("Catalyst Mass (g)", 1.0, 10000.0, 50.0)
+    eps_bed = st.number_input("Bed Porosity", 0.0, 1.0, 0.4)
+    mass_cat = st.number_input("Catalyst Mass (g)", 0.1, 100000.0, 50.0)
     
-    st.subheader("🌡️ Conditions")
-    t_in = st.number_input("Inlet Temp (°C)", 300.0, 1500.0, 900.0)
-    p_in = st.number_input("Inlet Pressure (bar)", 0.1, 100.0, 1.0)
-    flow = st.number_input("Flow Rate (mL/min)", 10.0, 10000.0, 100.0)
+    # 3. Operating Conditions
+    st.markdown("#### 🌡️ Operating Conditions")
+    t_in = st.number_input("Inlet Temperature (°C)", 25.0, 2000.0, 900.0)
+    p_in = st.number_input("Inlet Pressure (bar)", 0.1, 200.0, 1.0)
+    flow = st.number_input("Flow Rate (mL/min)", 0.1, 100000.0, 100.0)
     
-    st.subheader("🧬 Composition")
-    y_ch4 = st.number_input("CH4 Fraction", 0.0, 1.0, 0.2)
-    y_h2 = st.number_input("H2 Fraction", 0.0, 1.0, 0.0)
-    y_n2 = st.number_input("N2 Fraction", 0.0, 1.0, 0.8)
+    # 4. Inlet Composition
+    st.markdown("#### 🧬 Inlet Composition")
+    y_ch4 = st.number_input("CH₄ Mole Fraction", 0.0, 1.0, 0.20)
+    y_h2 = st.number_input("H₂ Mole Fraction", 0.0, 1.0, 0.00)
+    y_n2 = st.number_input("N₂ Mole Fraction", 0.0, 1.0, 0.80)
     
-    st.subheader("⚡ Kinetics")
-    pre_exp = st.number_input("Pre-exp A (1/s)", 1.0, 1e10, 1.0e6, format="%e")
-    act_e = st.number_input("Activation Energy (kJ/mol)", 10.0, 500.0, 100.0)
-    beta = st.number_input("Beta", -5.0, 5.0, 0.0)
-    dh = st.number_input("Heat of Rxn (kJ/mol)", 0.0, 200.0, 74.87)
+    # 5. Kinetic Parameters
+    st.markdown("#### ⚡ Kinetic Parameters")
+    pre_exp = st.number_input("Pre-exponential (A) [1/s]", 1.0, 1e15, 1.0e6, format="%e")
+    act_e = st.number_input("Activation Energy (kJ/mol)", 1.0, 1000.0, 100.0)
+    beta = st.number_input("Temperature Exponent (β)", -10.0, 10.0, 0.0)
+    dh = st.number_input("Heat of Reaction (kJ/mol)", -1000.0, 1000.0, 74.87)
     
-    st.subheader("🔧 Options")
-    st.session_state['iso_check'] = st.checkbox("Isothermal Mode", value=True)
+    # 6. Options
+    st.markdown("#### 🔧 Options")
+    st.session_state['iso_check'] = st.checkbox("Isothermal Simulation", value=True)
 
-    if st.button("▶️ Run Simulation", type="primary"):
+    # Run Button
+    if st.button("▶️ Run Simulation", type="primary", use_container_width=True):
         # Normalize composition
         total = y_ch4 + y_h2 + y_n2
         if total == 0: total = 1.0
@@ -301,60 +311,84 @@ with col_results:
         r = st.session_state.simulation_data
         cfg = st.session_state.config_data
         
-        # Original 6 Metrics
+        # Summary Display (Matches Desktop Metrics)
         m1, m2, m3 = st.columns(3)
-        m1.metric("Conversion", f"{r['X_CH4'][-1]*100:.2f}%")
-        m2.metric("H2 Rate", f"{r['V_dot_H2_Nm3_h'][-1]:.4f} Nm³/h")
-        m3.metric("H2 Mass", f"{r['m_dot_H2_kg_s'][-1]*3600:.4f} kg/h")
+        m1.metric("CH₄ Conversion", f"{r['X_CH4'][-1]*100:.2f} %")
+        m2.metric("H₂ Generation", f"{r['V_dot_H2_Nm3_h'][-1]:.4f} Nm³/h")
+        m3.metric("H₂ Mass Flow", f"{r['m_dot_H2_kg_s'][-1]*3600:.4f} kg/h")
         
         m4, m5, m6 = st.columns(3)
-        m4.metric("Carbon", f"{r['m_dot_C_kg_s'][-1]*3600:.4f} kg/h")
-        m5.metric("Outlet T", f"{r['T'][-1]-273.15:.1f} °C")
-        m6.metric("Delta P", f"{(cfg.inlet_pressure - r['P'][-1])/1000:.2f} kPa")
+        m4.metric("Carbon Production", f"{r['m_dot_C_kg_s'][-1]*3600:.4f} kg/h")
+        m5.metric("Outlet Temperature", f"{r['T'][-1]-273.15:.1f} °C")
+        m6.metric("Pressure Drop", f"{(cfg.inlet_pressure - r['P'][-1])/1000:.2f} kPa")
         
-        # Original 4 Tabs
-        tab1, tab2, tab3, tab4 = st.tabs(["Conversion", "Flow Rates", "Composition", "Conditions"])
+        # Tabs (Matches Desktop Tabs)
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "Conversion", "Flow Rates", "Composition", "Temperature", "Pressure", "H₂ Production"
+        ])
         
         z_cm = r['z'] * 100
         
         with tab1:
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.plot(z_cm, r['X_CH4']*100, color='#1a73e8', lw=2)
-            ax.set_ylabel('CH4 Conversion (%)'); ax.set_xlabel('Bed Length (cm)'); ax.grid(True, alpha=0.3)
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(z_cm, r['X_CH4']*100, color='blue', lw=2)
+            ax.set_ylabel('CH₄ Conversion [%]'); ax.set_xlabel('Axial Position [cm]'); ax.grid(True, alpha=0.3)
+            ax.set_title("Methane Conversion Profile")
             st.pyplot(fig)
             
         with tab2:
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.plot(z_cm, r['F_CH4']*1000, label='CH4', color='red')
-            ax.plot(z_cm, r['F_H2']*1000, label='H2', color='green')
-            ax.set_ylabel('Flow (mmol/s)'); ax.legend(); ax.grid(True, alpha=0.3)
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(z_cm, r['F_CH4']*1000, label='CH₄', color='red', lw=2)
+            ax.plot(z_cm, r['F_H2']*1000, label='H₂', color='green', lw=2)
+            ax.set_ylabel('Molar Flow Rate [mmol/s]'); ax.set_xlabel('Axial Position [cm]'); 
+            ax.legend(); ax.grid(True, alpha=0.3); ax.set_title("Species Flow Rates")
             st.pyplot(fig)
             
         with tab3:
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.plot(z_cm, r['y_CH4']*100, label='CH4', linestyle='--')
-            ax.plot(z_cm, r['y_H2']*100, label='H2')
-            ax.plot(z_cm, r['y_N2']*100, label='N2')
-            ax.set_ylabel('Mole Fraction (%)'); ax.legend(); ax.grid(True, alpha=0.3)
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(z_cm, r['y_CH4']*100, label='CH₄', linestyle='-', color='red', lw=2)
+            ax.plot(z_cm, r['y_H2']*100, label='H₂', linestyle='-', color='green', lw=2)
+            ax.plot(z_cm, r['y_N2']*100, label='N₂', linestyle='--', color='blue', lw=2)
+            ax.set_ylabel('Mole Fraction [%]'); ax.set_xlabel('Axial Position [cm]'); 
+            ax.legend(); ax.grid(True, alpha=0.3); ax.set_title("Gas Composition")
             st.pyplot(fig)
             
         with tab4:
-            fig, ax1 = plt.subplots(figsize=(6, 3))
-            ax1.plot(z_cm, r['T']-273.15, color='orange', label='Temp')
-            ax1.set_ylabel('Temp (°C)', color='orange')
-            ax2 = ax1.twinx()
-            ax2.plot(z_cm, r['P']/1e5, color='blue', label='Pressure')
-            ax2.set_ylabel('Pressure (bar)', color='blue')
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(z_cm, r['T']-273.15, color='red', lw=2)
+            ax.set_ylabel('Temperature [°C]'); ax.set_xlabel('Axial Position [cm]'); 
+            ax.grid(True, alpha=0.3); ax.set_title("Temperature Profile")
+            st.pyplot(fig)
+
+        with tab5:
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(z_cm, r['P']/1e5, color='blue', lw=2)
+            ax.set_ylabel('Pressure [bar]'); ax.set_xlabel('Axial Position [cm]'); 
+            ax.grid(True, alpha=0.3); ax.set_title("Pressure Profile")
+            st.pyplot(fig)
+
+        with tab6:
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(z_cm, r['V_dot_H2_Nm3_h'], color='green', lw=2)
+            ax.set_ylabel('H₂ Generation [Nm³/h]'); ax.set_xlabel('Axial Position [cm]'); 
+            ax.grid(True, alpha=0.3); ax.set_title("Cumulative H₂ Production")
             st.pyplot(fig)
             
+        # Download Button
+        df_export = pd.DataFrame({
+            'z_cm': z_cm, 'X_CH4': r['X_CH4'], 'T_C': r['T']-273.15, 'P_bar': r['P']/1e5, 
+            'H2_Nm3_h': r['V_dot_H2_Nm3_h']
+        })
+        st.download_button("💾 Download CSV Results", df_export.to_csv(index=False), "results.csv", "text/csv")
+
     else:
-        st.info("👈 Set parameters and click 'Run Simulation' to see results.")
+        st.info("👈 Set parameters in the sidebar and click 'Run Simulation'.")
 
 # --- Chat Panel (With Action Buttons) ---
 with col_chat:
     st.subheader("🤖 AI Assistant")
     
-    # Action Buttons
+    # Action Buttons (New Feature)
     with st.container():
         c1, c2, c3 = st.columns(3)
         if c1.button("📊 Analyze", use_container_width=True):
@@ -367,12 +401,12 @@ with col_chat:
     st.markdown("---")
     
     # Chat History
-    chat_container = st.container(height=400)
+    chat_container = st.container(height=500)
     for msg in st.session_state.chat_history:
         chat_container.chat_message(msg["role"]).write(msg["content"])
         
     # Input
-    if prompt := st.chat_input("Ask a question..."):
+    if prompt := st.chat_input("Ask a question about your simulation..."):
         handle_ai_request(prompt)
         st.rerun()
 
