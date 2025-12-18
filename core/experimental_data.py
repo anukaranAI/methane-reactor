@@ -1,8 +1,10 @@
 """
-Anukaran AI - Experimental Data Storage
-=======================================
-Contains experimental data for model validation.
+Anukaran AI - Experimental Data & Reactor Configurations
+=========================================================
 Methane decomposition: CH4 → C + 2H2
+
+Temperature Focus: 800°C
+Target H2 at outlet: 30%
 """
 
 import numpy as np
@@ -10,13 +12,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 # ============================================================================
-# EXPERIMENTAL DATA FROM LITERATURE
+# EXPERIMENTAL DATA
 # ============================================================================
 
-# Time on Stream (TOS) in minutes
 TOS_MINUTES = np.array([0, 30, 60, 90, 120, 150, 180, 210])
 
-# Experimental data at different temperatures
 EXPERIMENTAL_DATA = {
     770: {
         "TOS_min": TOS_MINUTES,
@@ -36,32 +36,102 @@ EXPERIMENTAL_DATA = {
 }
 
 # ============================================================================
-# EXPERIMENTAL CONDITIONS
+# LAB SCALE CONFIGURATION (GIVEN VALUES)
 # ============================================================================
 
 @dataclass
-class ExperimentalConditions:
-    """Experimental setup parameters"""
-    reactor_diameter_cm: float = 2.5
-    bed_height_cm: float = 10.0
-    particle_diameter_um: float = 500.0
-    catalyst_density_kg_m3: float = 2000.0
+class LabScaleConfig:
+    """Lab scale reactor - GIVEN values from experiments"""
+    # Given values
+    flow_rate_mL_min: float = 75.0           # mL/min
+    inlet_CH4_percent: float = 100.0          # %
+    reactor_diameter_cm: float = 1.8          # cm (18mm)
+    bed_height_cm: float = 2.59               # cm
+    catalyst_mass_g: float = 2.2              # g
+    particle_density_kg_m3: float = 2821.56   # kg/m³
+    particle_size_um: float = 10.0            # μm
+    temperature_C: float = 800.0              # °C
+    
+    # Assumed values
+    bed_porosity: float = 0.4                 # Assumed - typical packed bed
+    particle_porosity: float = 0.5            # Assumed - porous catalyst
+    tortuosity: float = 3.0                   # Assumed - typical
+    inlet_pressure_bar: float = 1.0           # Assumed - atmospheric
+    
+    def get_assumptions(self) -> Dict[str, str]:
+        """Return dictionary of assumed values for display"""
+        return {
+            "Bed porosity (ε)": f"{self.bed_porosity} (typical packed bed)",
+            "Particle porosity (εp)": f"{self.particle_porosity} (porous catalyst)",
+            "Tortuosity (τ)": f"{self.tortuosity} (typical value)",
+            "Inlet pressure": f"{self.inlet_pressure_bar} bar (atmospheric)",
+        }
+
+
+# ============================================================================
+# INDUSTRIAL SCALE CONFIGURATION (GIVEN + TO OPTIMIZE)
+# ============================================================================
+
+@dataclass
+class IndustrialScaleConfig:
+    """Industrial scale reactor - GIVEN values + optimization targets"""
+    # Given values
+    flow_rate_LPM: float = 1960.0             # LPM (liters per minute)
+    inlet_CH4_percent: float = 100.0          # %
+    catalyst_mass_kg: float = 57.0            # kg
+    particle_density_kg_m3: float = 2821.56   # kg/m³
+    particle_size_um: float = 10.0            # μm
+    temperature_C: float = 800.0              # °C
+    
+    # Optimization constraints (given)
+    LD_ratio_min: float = 1.0                 # L/D minimum
+    LD_ratio_max: float = 3.0                 # L/D maximum
+    target_H2_percent: float = 30.0           # Target H2 at outlet
+    
+    # Assumed values (same as lab for consistency)
+    bed_porosity: float = 0.4
     particle_porosity: float = 0.5
     tortuosity: float = 3.0
-    bed_porosity: float = 0.4
-    catalyst_mass_g: float = 20.0
     inlet_pressure_bar: float = 1.0
-    flow_rate_mL_min: float = 50.0
-    y_CH4_in: float = 0.5
-    y_H2_in: float = 0.0
-    y_N2_in: float = 0.5
-    pre_exponential: float = 1.0e6
-    activation_energy_kJ_mol: float = 100.0
-    beta: float = 0.0
-    heat_of_reaction_kJ_mol: float = 74.87
+    max_pressure_drop_kPa: float = 50.0       # Assumed industrial limit
+    
+    def get_assumptions(self) -> Dict[str, str]:
+        """Return dictionary of assumed values for display"""
+        return {
+            "Bed porosity (ε)": f"{self.bed_porosity} (same as lab)",
+            "Particle porosity (εp)": f"{self.particle_porosity} (same as lab)",
+            "Tortuosity (τ)": f"{self.tortuosity} (same as lab)",
+            "Inlet pressure": f"{self.inlet_pressure_bar} bar (atmospheric)",
+            "Max pressure drop": f"{self.max_pressure_drop_kPa} kPa (industrial limit)",
+        }
+    
+    def calculate_bed_volume_m3(self) -> float:
+        """Calculate required bed volume from catalyst mass"""
+        # V_bed = m_cat / (ρ_cat * (1 - ε))
+        return self.catalyst_mass_kg / (self.particle_density_kg_m3 * (1 - self.bed_porosity))
+    
+    def calculate_geometry(self, LD_ratio: float) -> Dict[str, float]:
+        """Calculate D and L for given L/D ratio"""
+        V_bed = self.calculate_bed_volume_m3()
+        # V = π/4 * D² * L, and L = LD_ratio * D
+        # V = π/4 * D² * LD_ratio * D = π/4 * LD_ratio * D³
+        # D = (4V / (π * LD_ratio))^(1/3)
+        D_m = (4 * V_bed / (np.pi * LD_ratio)) ** (1/3)
+        L_m = LD_ratio * D_m
+        return {
+            "diameter_m": D_m,
+            "diameter_cm": D_m * 100,
+            "height_m": L_m,
+            "height_cm": L_m * 100,
+            "LD_ratio": LD_ratio,
+            "volume_m3": V_bed,
+            "volume_L": V_bed * 1000,
+        }
 
 
-DEFAULT_CONDITIONS = ExperimentalConditions()
+# Default configurations
+LAB_CONFIG = LabScaleConfig()
+INDUSTRIAL_CONFIG = IndustrialScaleConfig()
 
 
 # ============================================================================
@@ -97,13 +167,18 @@ def get_all_initial_values() -> Dict[int, Dict]:
     return result
 
 
-def interpolate_experimental(temperature_C: int, time_min: float) -> Optional[Dict]:
-    """Interpolate experimental data at a specific time."""
-    data = get_experimental_data(temperature_C)
-    if data is None:
-        return None
+def get_scale_comparison() -> Dict:
+    """Get side-by-side comparison of lab vs industrial scale"""
+    lab = LAB_CONFIG
+    ind = INDUSTRIAL_CONFIG
     
-    H2_interp = np.interp(time_min, data["TOS_min"], data["H2_percent"])
-    CH4_interp = np.interp(time_min, data["TOS_min"], data["CH4_percent"])
+    # Calculate scale factors
+    flow_scale = (ind.flow_rate_LPM * 1000) / lab.flow_rate_mL_min
+    mass_scale = (ind.catalyst_mass_kg * 1000) / lab.catalyst_mass_g
     
-    return {"H2_percent": H2_interp, "CH4_percent": CH4_interp}
+    return {
+        "flow_scale_factor": flow_scale,
+        "mass_scale_factor": mass_scale,
+        "lab": lab,
+        "industrial": ind,
+    }
