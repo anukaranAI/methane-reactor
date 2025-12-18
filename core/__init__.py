@@ -1,7 +1,7 @@
 """
 Anukaran AI - Core Module
 =========================
-Contains optimization engine, templates, and transient model.
+Reactor simulation, optimization, and scale-up.
 """
 
 from .templates import (
@@ -24,55 +24,49 @@ from .optimizer import (
 from .transient_model import (
     DeactivationParams,
     DeactivationModel,
-    TransientReactorConfig,
+    ReactorConfig,
+    SteadyStateReactor,
     TransientReactor,
-    create_transient_config,
-    fit_deactivation_parameter,
-    run_validation_at_temperature
+    calibrate_kinetics,
+    fit_deactivation,
 )
 
 from .experimental_data import (
     EXPERIMENTAL_DATA,
     TOS_MINUTES,
-    ExperimentalConditions,
-    DEFAULT_CONDITIONS,
+    LabScaleConfig,
+    IndustrialScaleConfig,
+    LAB_CONFIG,
+    INDUSTRIAL_CONFIG,
     get_experimental_data,
     get_available_temperatures,
     get_initial_values,
     get_all_initial_values,
-    interpolate_experimental
+    get_scale_comparison,
+)
+
+from .scaleup import (
+    ScaleUpResult,
+    IndustrialScaleUp,
+    get_assumptions_text,
 )
 
 __all__ = [
     # Templates
-    'OPTIMIZATION_TEMPLATES',
-    'get_template',
-    'get_template_names',
-    'get_variable_bounds',
-    'get_variable_names',
+    'OPTIMIZATION_TEMPLATES', 'get_template', 'get_template_names',
+    'get_variable_bounds', 'get_variable_names',
     # Optimizer
-    'OptimizationResult',
-    'OptimizationConfig',
-    'BayesianOptimizer',
-    'SensitivityAnalyzer',
-    'create_objective_function',
-    'get_base_config_from_session',
-    # Transient model
-    'DeactivationParams',
-    'DeactivationModel',
-    'TransientReactorConfig',
-    'TransientReactor',
-    'create_transient_config',
-    'fit_deactivation_parameter',
-    'run_validation_at_temperature',
-    # Experimental data
-    'EXPERIMENTAL_DATA',
-    'TOS_MINUTES',
-    'ExperimentalConditions',
-    'DEFAULT_CONDITIONS',
-    'get_experimental_data',
-    'get_available_temperatures',
-    'get_initial_values',
-    'get_all_initial_values',
-    'interpolate_experimental',
+    'OptimizationResult', 'OptimizationConfig', 'BayesianOptimizer',
+    'SensitivityAnalyzer', 'create_objective_function', 'get_base_config_from_session',
+    # Transient
+    'DeactivationParams', 'DeactivationModel', 'ReactorConfig',
+    'SteadyStateReactor', 'TransientReactor',
+    'calibrate_kinetics', 'fit_deactivation',
+    # Data
+    'EXPERIMENTAL_DATA', 'TOS_MINUTES', 'LabScaleConfig', 'IndustrialScaleConfig',
+    'LAB_CONFIG', 'INDUSTRIAL_CONFIG', 'get_experimental_data',
+    'get_available_temperatures', 'get_initial_values', 'get_all_initial_values',
+    'get_scale_comparison',
+    # Scale-up
+    'ScaleUpResult', 'IndustrialScaleUp', 'get_assumptions_text',
 ]
