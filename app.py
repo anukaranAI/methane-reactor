@@ -2,7 +2,10 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║                         ANUKARAN AI                              ║
 ║          Methane Decomposition Reactor Simulator                 ║
-║         Steady-State | Transient | AI-Powered Optimization       ║
+║                                                                  ║
+║   Lab Scale Calibration → Industrial Scale-Up Optimization       ║
+║                     Temperature: 800°C                           ║
+║                     Target H2: 30%                               ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -10,630 +13,722 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import time
 
 # --- LOCAL IMPORTS ---
-from reactor_model import ReactorConfig, MethaneDecompositionReactor, MW_C, MW_H2
+from reactor_model import ReactorConfig as OldReactorConfig, MethaneDecompositionReactor
 from ai_assistant import GeminiAssistant
-from core.templates import OPTIMIZATION_TEMPLATES, get_template, get_template_names
-from core.optimizer import (
-    OptimizationConfig,
-    BayesianOptimizer,
-    create_objective_function,
-    get_base_config_from_session
+
+from core.experimental_data import (
+    EXPERIMENTAL_DATA, TOS_MINUTES,
+    LAB_CONFIG, INDUSTRIAL_CONFIG,
+    get_experimental_data, get_available_temperatures,
 )
 from core.transient_model import (
-    DeactivationParams,
-    DeactivationModel,
-    TransientReactor,
-    create_transient_config,
-    fit_deactivation_parameter,
-    run_validation_at_temperature
+    ReactorConfig, SteadyStateReactor, TransientReactor,
+    DeactivationModel, DeactivationParams,
+    calibrate_kinetics, fit_deactivation,
 )
-from core.experimental_data import (
-    EXPERIMENTAL_DATA,
-    get_experimental_data,
-    get_available_temperatures,
-    get_all_initial_values
-)
-from utils.plotting import (
-    create_convergence_plot,
-    create_trials_table_data,
-    create_summary_stats
+from core.scaleup import (
+    IndustrialScaleUp, ScaleUpResult, get_assumptions_text,
 )
 
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(
-    page_title="Anukaran AI - Reactor Simulator",
+    page_title="Anukaran AI - Reactor Scale-Up",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ============================================================================
-# API KEY
+# CUSTOM CSS
 # ============================================================================
-try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except (FileNotFoundError, KeyError):
-    GEMINI_API_KEY = ""
+st.markdown("""
+<style>
+    .big-metric {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #1f77b4;
+    }
+    .success-box {
+        padding: 1rem;
+        background-color: #d4edda;
+        border-radius: 0.5rem;
+        border-left: 4px solid #28a745;
+    }
+    .warning-box {
+        padding: 1rem;
+        background-color: #fff3cd;
+        border-radius: 0.5rem;
+        border-left: 4px solid #ffc107;
+    }
+    .info-box {
+        padding: 1rem;
+        background-color: #e7f3ff;
+        border-radius: 0.5rem;
+        border-left: 4px solid #0066cc;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================================================
 # SESSION STATE
 # ============================================================================
-if 'simulation_data' not in st.session_state:
-    st.session_state.simulation_data = None
-if 'config_data' not in st.session_state:
-    st.session_state.config_data = None
+if 'calibrated_A' not in st.session_state:
+    st.session_state.calibrated_A = 5.0e4
+if 'calibrated_Ea' not in st.session_state:
+    st.session_state.calibrated_Ea = 150000.0
+if 'calibrated_kd' not in st.session_state:
+    st.session_state.calibrated_kd = 0.008
+if 'calibration_done' not in st.session_state:
+    st.session_state.calibration_done = False
+if 'lab_results' not in st.session_state:
+    st.session_state.lab_results = None
+if 'industrial_results' not in st.session_state:
+    st.session_state.industrial_results = None
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
-if 'optimization_result' not in st.session_state:
-    st.session_state.optimization_result = None
-if 'validation_results' not in st.session_state:
-    st.session_state.validation_results = {}
-if 'fitted_kd' not in st.session_state:
-    st.session_state.fitted_kd = {770: 0.01, 800: 0.015, 830: 0.02}
 
 # ============================================================================
-# CORE FUNCTIONS
+# API KEY
 # ============================================================================
-
-def run_simulation():
-    """Run single simulation with current parameters"""
-    try:
-        total_y = st.session_state.y_ch4 + st.session_state.y_h2 + st.session_state.y_n2
-        if total_y == 0:
-            total_y = 1.0
-        
-        config = ReactorConfig(
-            diameter=st.session_state.d_reac / 100,
-            bed_height=st.session_state.h_bed / 100,
-            particle_diameter=st.session_state.d_part * 1e-6,
-            catalyst_density=st.session_state.rho_cat,
-            particle_porosity=st.session_state.eps_part,
-            tortuosity=st.session_state.tau,
-            bed_porosity=st.session_state.eps_bed,
-            catalyst_mass=st.session_state.mass_cat / 1000,
-            inlet_temperature=st.session_state.t_in + 273.15,
-            inlet_pressure=st.session_state.p_in * 1e5,
-            flow_rate=st.session_state.flow / 60 / 1e6,
-            y_CH4_in=st.session_state.y_ch4 / total_y,
-            y_H2_in=st.session_state.y_h2 / total_y,
-            y_N2_in=st.session_state.y_n2 / total_y,
-            pre_exponential=st.session_state.pre_exp,
-            activation_energy=st.session_state.act_e * 1000,
-            beta=st.session_state.beta,
-            heat_of_reaction=st.session_state.dh * 1e6
-        )
-        
-        reactor = MethaneDecompositionReactor(config, isothermal=st.session_state.iso_check)
-        st.session_state.simulation_data = reactor.solve()
-        st.session_state.config_data = config
-        
-    except Exception as e:
-        st.error(f"Simulation Failed: {e}")
-
-
-def handle_ai_request(prompt_text):
-    """Handle AI chat request"""
-    st.session_state.chat_history.append({"role": "user", "content": prompt_text})
-    
-    context_str = "No simulation run yet."
-    if st.session_state.simulation_data:
-        r = st.session_state.simulation_data
-        cfg = st.session_state.config_data
-        context_str = (
-            f"Inlet: T={cfg.inlet_temperature-273.15:.0f}°C, P={cfg.inlet_pressure/1e5:.1f}bar. "
-            f"Results: Conversion={r['X_CH4'][-1]*100:.2f}%, "
-            f"H2 Yield={r['V_dot_H2_Nm3_h'][-1]:.4f} Nm³/h."
-        )
-
-    if GEMINI_API_KEY:
-        ai = GeminiAssistant(GEMINI_API_KEY)
-        response = ai.generate_response(prompt_text, context_str)
-    else:
-        response = "⚠️ AI not configured. Add GEMINI_API_KEY to secrets."
-    
-    st.session_state.chat_history.append({"role": "assistant", "content": response})
-
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    GEMINI_API_KEY = ""
 
 # ============================================================================
 # HEADER
 # ============================================================================
-col_logo, col_title = st.columns([1, 4])
-with col_logo:
-    st.image("https://raw.githubusercontent.com/anukaranAI/methane-reactor/main/AnukaranNew7.png", width=150)
-with col_title:
-    st.title("Methane Decomposition Reactor Simulator")
-    st.caption("Steady-State | Transient with Deactivation | AI-Powered Optimization")
+col1, col2 = st.columns([1, 5])
+with col1:
+    st.image("https://raw.githubusercontent.com/anukaranAI/methane-reactor/main/AnukaranNew7.png", width=120)
+with col2:
+    st.title("Methane Decomposition Reactor")
+    st.markdown("**Lab Scale Calibration → Industrial Scale-Up** | CH₄ → C + 2H₂ | **800°C** | Target H₂: **30%**")
 
 st.markdown("---")
 
 # ============================================================================
-# SIDEBAR
+# SIDEBAR - ASSUMPTIONS & PARAMETERS
 # ============================================================================
 with st.sidebar:
-    st.header("⚙️ Input Parameters")
+    st.header("📋 Configuration")
     
-    st.markdown("#### 📐 Geometry")
-    st.number_input("Reactor Diameter (cm)", 0.1, 500.0, 5.0, key="d_reac")
-    st.number_input("Bed Height (cm)", 0.1, 1000.0, 20.0, key="h_bed")
+    st.markdown("### 🌡️ Operating Conditions")
+    st.info("**Temperature: 800°C** (Fixed)")
+    st.info("**Target H₂: 30%** (At outlet)")
     
-    st.markdown("#### 🧪 Catalyst")
-    st.number_input("Particle Diameter (μm)", 1.0, 10000.0, 500.0, key="d_part")
-    st.number_input("Catalyst Density (kg/m³)", 100.0, 10000.0, 2000.0, key="rho_cat")
-    st.number_input("Particle Porosity", 0.0, 1.0, 0.5, key="eps_part")
-    st.number_input("Tortuosity", 1.0, 10.0, 3.0, key="tau")
-    st.number_input("Bed Porosity", 0.0, 1.0, 0.4, key="eps_bed")
-    st.number_input("Catalyst Mass (g)", 0.1, 100000.0, 50.0, key="mass_cat")
+    st.markdown("---")
+    st.markdown("### 🔬 Lab Scale (Given)")
+    st.markdown(f"""
+    - Flow: **{LAB_CONFIG.flow_rate_mL_min} mL/min**
+    - CH₄ inlet: **{LAB_CONFIG.inlet_CH4_percent}%**
+    - Diameter: **{LAB_CONFIG.reactor_diameter_cm} cm**
+    - Bed height: **{LAB_CONFIG.bed_height_cm} cm**
+    - Catalyst: **{LAB_CONFIG.catalyst_mass_g} g**
+    - Particle: **{LAB_CONFIG.particle_size_um} μm**
+    """)
     
-    st.markdown("#### 🌡️ Conditions")
-    st.number_input("Inlet Temp (°C)", 25.0, 2000.0, 900.0, key="t_in")
-    st.number_input("Inlet Pressure (bar)", 0.1, 200.0, 1.0, key="p_in")
-    st.number_input("Flow Rate (mL/min)", 0.1, 100000.0, 100.0, key="flow")
+    st.markdown("---")
+    st.markdown("### 🏭 Industrial Scale (Given)")
+    st.markdown(f"""
+    - Flow: **{INDUSTRIAL_CONFIG.flow_rate_LPM} LPM**
+    - CH₄ inlet: **{INDUSTRIAL_CONFIG.inlet_CH4_percent}%**
+    - Catalyst: **{INDUSTRIAL_CONFIG.catalyst_mass_kg} kg**
+    - Particle: **{INDUSTRIAL_CONFIG.particle_size_um} μm**
+    - L/D ratio: **{INDUSTRIAL_CONFIG.LD_ratio_min}-{INDUSTRIAL_CONFIG.LD_ratio_max}**
+    """)
     
-    st.markdown("#### 🧬 Composition")
-    st.number_input("CH₄ Mole Fraction", 0.0, 1.0, 0.20, key="y_ch4")
-    st.number_input("H₂ Mole Fraction", 0.0, 1.0, 0.00, key="y_h2")
-    st.number_input("N₂ Mole Fraction", 0.0, 1.0, 0.80, key="y_n2")
+    st.markdown("---")
+    st.markdown("### ⚙️ Assumed Parameters")
+    st.markdown(f"""
+    - Bed porosity: **{LAB_CONFIG.bed_porosity}**
+    - Particle porosity: **{LAB_CONFIG.particle_porosity}**
+    - Tortuosity: **{LAB_CONFIG.tortuosity}**
+    - Max ΔP: **{INDUSTRIAL_CONFIG.max_pressure_drop_kPa} kPa**
+    """)
     
-    st.markdown("#### ⚡ Kinetics")
-    st.number_input("Pre-exp (A) [1/s]", 1.0, 1e15, 1.0e6, format="%e", key="pre_exp")
-    st.number_input("Activation Energy (kJ/mol)", 1.0, 1000.0, 100.0, key="act_e")
-    st.number_input("Temp Exponent (β)", -10.0, 10.0, 0.0, key="beta")
-    st.number_input("Heat of Rxn (kJ/mol)", -1000.0, 1000.0, 74.87, key="dh")
-    
-    st.markdown("#### 🔧 Options")
-    st.checkbox("Isothermal Simulation", value=True, key="iso_check")
-    
-    st.button("▶️ Run Simulation", type="primary", use_container_width=True, on_click=run_simulation)
+    st.markdown("---")
+    if st.session_state.calibration_done:
+        st.success("✅ Kinetics Calibrated")
+        st.markdown(f"""
+        - A: **{st.session_state.calibrated_A:.2e}** 1/s
+        - Ea: **{st.session_state.calibrated_Ea/1000:.1f}** kJ/mol
+        - kd: **{st.session_state.calibrated_kd:.4f}** 1/min
+        """)
 
 # ============================================================================
-# MAIN CONTENT - TABS
+# MAIN TABS
 # ============================================================================
-tab_sim, tab_transient, tab_opt, tab_chat = st.tabs([
-    "📊 Steady-State", 
-    "⏱️ Transient/Validation", 
-    "🎯 Optimizer", 
-    "🤖 AI Assistant"
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Experimental Data",
+    "🔬 Lab Calibration", 
+    "🏭 Industrial Scale-Up",
+    "📈 Comparison",
+    "📋 Assumptions"
 ])
 
 # ============================================================================
-# TAB 1: STEADY-STATE SIMULATION
+# TAB 1: EXPERIMENTAL DATA
 # ============================================================================
-with tab_sim:
-    if st.session_state.simulation_data:
-        r = st.session_state.simulation_data
-        cfg = st.session_state.config_data
-        
-        # Metrics
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Conversion", f"{r['X_CH4'][-1]*100:.2f} %")
-        m2.metric("H₂ Generation", f"{r['V_dot_H2_Nm3_h'][-1]:.4f} Nm³/h")
-        m3.metric("H₂ Mass Flow", f"{r['m_dot_H2_kg_s'][-1]*3600:.4f} kg/h")
-        m4.metric("Pressure Drop", f"{(cfg.inlet_pressure - r['P'][-1])/1000:.2f} kPa")
-        
-        # Plots
-        plot_tabs = st.tabs(["Conversion", "Flow Rates", "Composition", "Temperature", "Pressure", "H₂ Yield"])
-        z_cm = r['z'] * 100
-        
-        with plot_tabs[0]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(z_cm, r['X_CH4']*100, 'b-', lw=2)
-            ax.set_xlabel("Axial Position [cm]")
-            ax.set_ylabel("CH₄ Conversion [%]")
-            ax.set_title("Conversion Profile")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        with plot_tabs[1]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(z_cm, r['F_CH4']*1000, 'r-', lw=2, label='CH₄')
-            ax.plot(z_cm, r['F_H2']*1000, 'g-', lw=2, label='H₂')
-            ax.set_xlabel("Axial Position [cm]")
-            ax.set_ylabel("Molar Flow [mmol/s]")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        with plot_tabs[2]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(z_cm, r['y_CH4']*100, 'r-', lw=2, label='CH₄')
-            ax.plot(z_cm, r['y_H2']*100, 'g-', lw=2, label='H₂')
-            ax.plot(z_cm, r['y_N2']*100, 'b--', lw=2, label='N₂')
-            ax.set_xlabel("Axial Position [cm]")
-            ax.set_ylabel("Mole Fraction [%]")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        with plot_tabs[3]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(z_cm, r['T']-273.15, 'orange', lw=2)
-            ax.set_xlabel("Axial Position [cm]")
-            ax.set_ylabel("Temperature [°C]")
-            ax.set_title("Temperature Profile")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        with plot_tabs[4]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(z_cm, r['P']/1e5, 'purple', lw=2)
-            ax.set_xlabel("Axial Position [cm]")
-            ax.set_ylabel("Pressure [bar]")
-            ax.set_title("Pressure Profile")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        with plot_tabs[5]:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(z_cm, r['V_dot_H2_Nm3_h'], 'green', lw=2)
-            ax.set_xlabel("Axial Position [cm]")
-            ax.set_ylabel("H₂ Production [Nm³/h]")
-            ax.set_title("Cumulative H₂ Production")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            plt.close(fig)
-        
-        # Download
-        df = pd.DataFrame({
-            'z_cm': z_cm,
-            'Conversion_%': r['X_CH4']*100,
-            'T_C': r['T']-273.15,
-            'P_bar': r['P']/1e5,
-            'H2_Nm3h': r['V_dot_H2_Nm3_h']
-        })
-        st.download_button("💾 Download Results CSV", df.to_csv(index=False), "simulation_results.csv", "text/csv")
-    else:
-        st.info("👈 Configure parameters in sidebar and click **Run Simulation**")
-
-# ============================================================================
-# TAB 2: TRANSIENT / VALIDATION
-# ============================================================================
-with tab_transient:
-    st.subheader("⏱️ Transient Simulation with Catalyst Deactivation")
-    st.markdown("Compare model predictions with experimental data over time.")
+with tab1:
+    st.header("📊 Experimental Data @ 800°C")
     
-    col1, col2 = st.columns([1, 2])
+    col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.markdown("#### Experimental Conditions")
+        st.markdown("### Raw Data")
+        exp_data = get_experimental_data(800)
+        df = pd.DataFrame({
+            'TOS (min)': exp_data['TOS_min'],
+            'H₂ (%)': exp_data['H2_percent'],
+            'CH₄ (%)': exp_data['CH4_percent'],
+        })
+        st.dataframe(df, use_container_width=True, hide_index=True)
         
-        # Temperature selection
-        available_temps = get_available_temperatures()
-        selected_temp = st.selectbox(
-            "Select Temperature",
-            options=available_temps,
-            format_func=lambda x: f"{x} °C",
-            key="val_temp"
-        )
-        
-        st.markdown("#### Deactivation Parameters")
-        
-        deact_model_type = st.selectbox(
-            "Deactivation Model",
-            options=['first_order', 'second_order', 'coking'],
-            format_func=lambda x: {
-                'first_order': '1st Order: da/dt = -kd·a',
-                'second_order': '2nd Order: da/dt = -kd·a²',
-                'coking': 'Coking: da/dt = -kd·a·C_CH4'
-            }[x],
-            key="deact_model"
-        )
-        
-        k_d_value = st.number_input(
-            "Deactivation Rate (kd) [1/min]",
-            min_value=0.001,
-            max_value=0.5,
-            value=st.session_state.fitted_kd.get(selected_temp, 0.01),
-            format="%.4f",
-            key="k_d_input"
-        )
-        
-        t_final = st.slider("Simulation Time (min)", 30, 300, 210, key="t_final")
-        
-        # Buttons
-        col_btn1, col_btn2 = st.columns(2)
-        
-        run_transient = col_btn1.button("▶️ Run Transient", type="primary", use_container_width=True)
-        fit_kd = col_btn2.button("🔧 Auto-Fit kd", use_container_width=True)
+        st.markdown("### Key Observations")
+        st.markdown(f"""
+        - **Initial H₂ (TOS=0):** {exp_data['H2_percent'][0]:.2f}%
+        - **Final H₂ (TOS=210):** {exp_data['H2_percent'][-1]:.2f}%
+        - **H₂ Decay:** {exp_data['H2_percent'][0] - exp_data['H2_percent'][-1]:.2f}%
+        - **Decay Rate:** {(1 - exp_data['H2_percent'][-1]/exp_data['H2_percent'][0])*100:.1f}%
+        """)
     
     with col2:
-        # Show experimental data table
-        st.markdown("#### Experimental Data")
-        exp_data = get_experimental_data(selected_temp)
-        if exp_data:
-            exp_df = pd.DataFrame({
-                'TOS (min)': exp_data['TOS_min'],
-                'H2 (%)': exp_data['H2_percent'],
-                'CH4 (%)': exp_data['CH4_percent']
-            })
-            st.dataframe(exp_df, use_container_width=True, hide_index=True)
+        st.markdown("### H₂ Composition vs Time")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        
+        ax.plot(exp_data['TOS_min'], exp_data['H2_percent'], 'o-', 
+                color='#1f77b4', markersize=10, linewidth=2, label='H₂ %')
+        ax.axhline(y=30, color='green', linestyle='--', linewidth=2, label='Target (30%)')
+        
+        ax.set_xlabel('Time on Stream [min]', fontsize=12)
+        ax.set_ylabel('H₂ Composition [%]', fontsize=12)
+        ax.set_title('Experimental Data @ 800°C', fontsize=14, fontweight='bold')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0, 35])
+        
+        st.pyplot(fig)
+        plt.close(fig)
+        
+        st.markdown("### Interpretation")
+        st.info("""
+        📌 **Catalyst Deactivation Observed:**
+        - H₂ production decreases over time
+        - Caused by carbon deposition on catalyst
+        - Need to model this for accurate industrial design
+        """)
+
+# ============================================================================
+# TAB 2: LAB CALIBRATION
+# ============================================================================
+with tab2:
+    st.header("🔬 Lab Scale Kinetic Calibration")
     
-    # Auto-fit kd
-    if fit_kd:
-        with st.spinner(f"Fitting deactivation parameter for {selected_temp}°C..."):
-            config = create_transient_config(temperature_C=selected_temp)
-            exp_data = get_experimental_data(selected_temp)
+    st.markdown("""
+    **Objective:** Find kinetic parameters (A, Ea, kd) that match experimental data.
+    
+    **Method:**
+    1. Calibrate A and Ea to match H₂% at TOS=0 (fresh catalyst)
+    2. Calibrate kd to match the deactivation curve over time
+    """)
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.markdown("### Step 1: Kinetic Parameters")
+        
+        st.markdown("#### Adjust to match TOS=0 data")
+        
+        A_exp = st.slider(
+            "Pre-exponential (A) - log₁₀ scale",
+            min_value=2.0, max_value=10.0,
+            value=np.log10(st.session_state.calibrated_A),
+            step=0.1,
+            key="A_slider"
+        )
+        A_value = 10 ** A_exp
+        st.markdown(f"**A = {A_value:.2e} 1/s**")
+        
+        Ea_value = st.slider(
+            "Activation Energy (Ea) [kJ/mol]",
+            min_value=80.0, max_value=250.0,
+            value=st.session_state.calibrated_Ea / 1000,
+            step=5.0,
+            key="Ea_slider"
+        )
+        st.markdown(f"**Ea = {Ea_value:.0f} kJ/mol**")
+        
+        st.markdown("---")
+        st.markdown("### Step 2: Deactivation")
+        
+        kd_value = st.slider(
+            "Deactivation rate (kd) [1/min]",
+            min_value=0.001, max_value=0.05,
+            value=st.session_state.calibrated_kd,
+            step=0.001,
+            format="%.4f",
+            key="kd_slider"
+        )
+        
+        if st.button("🔄 Run Lab Simulation", type="primary", use_container_width=True):
+            with st.spinner("Simulating lab reactor..."):
+                # Create config
+                config = ReactorConfig.from_lab_config(
+                    LAB_CONFIG, 
+                    A=A_value, 
+                    Ea=Ea_value * 1000
+                )
+                
+                # Run transient simulation
+                deact = DeactivationModel('first_order', DeactivationParams(k_d=kd_value))
+                reactor = TransientReactor(config, deact)
+                results = reactor.solve(t_final_min=210, dt_min=1.0)
+                
+                st.session_state.lab_results = results
+                st.session_state.calibrated_A = A_value
+                st.session_state.calibrated_Ea = Ea_value * 1000
+                st.session_state.calibrated_kd = kd_value
+                st.session_state.calibration_done = True
             
-            best_kd, best_rmse = fit_deactivation_parameter(
-                exp_data['H2_percent'],
-                exp_data['TOS_min'],
-                config,
-                k_d_range=(0.001, 0.1),
-                n_trials=30
+            st.success("✅ Simulation complete!")
+    
+    with col2:
+        st.markdown("### Results: Model vs Experimental")
+        
+        if st.session_state.lab_results is not None:
+            results = st.session_state.lab_results
+            exp_data = get_experimental_data(800)
+            
+            # Calculate RMSE
+            model_H2_at_exp = np.interp(exp_data['TOS_min'], results['time_min'], results['H2_percent'])
+            rmse = np.sqrt(np.mean((model_H2_at_exp - exp_data['H2_percent'])**2))
+            
+            # Metrics
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Model H₂ (t=0)", f"{results['H2_percent'][0]:.2f}%")
+            m2.metric("Exp H₂ (t=0)", f"{exp_data['H2_percent'][0]:.2f}%")
+            m3.metric("RMSE", f"{rmse:.2f}%")
+            
+            # Plot
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            
+            # H2 comparison
+            axes[0].plot(results['time_min'], results['H2_percent'], 'b-', 
+                        linewidth=2, label='Model')
+            axes[0].scatter(exp_data['TOS_min'], exp_data['H2_percent'], 
+                           c='red', s=80, zorder=5, label='Experimental')
+            axes[0].axhline(y=30, color='green', linestyle='--', label='Target 30%')
+            axes[0].set_xlabel('Time on Stream [min]')
+            axes[0].set_ylabel('H₂ [%]')
+            axes[0].set_title('H₂ Composition')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            axes[0].set_ylim([0, 40])
+            
+            # Activity
+            axes[1].plot(results['time_min'], results['activity'], 'g-', linewidth=2)
+            axes[1].set_xlabel('Time on Stream [min]')
+            axes[1].set_ylabel('Activity [-]')
+            axes[1].set_title('Catalyst Activity Decay')
+            axes[1].grid(True, alpha=0.3)
+            axes[1].set_ylim([0, 1.1])
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+            
+            # Error table
+            st.markdown("#### Point-by-Point Comparison")
+            comp_df = pd.DataFrame({
+                'TOS (min)': exp_data['TOS_min'],
+                'Exp H₂ (%)': exp_data['H2_percent'],
+                'Model H₂ (%)': model_H2_at_exp,
+                'Error (%)': model_H2_at_exp - exp_data['H2_percent'],
+            })
+            st.dataframe(comp_df.style.format({
+                'Exp H₂ (%)': '{:.2f}',
+                'Model H₂ (%)': '{:.2f}',
+                'Error (%)': '{:+.2f}',
+            }), use_container_width=True, hide_index=True)
+            
+            if rmse < 3.0:
+                st.success(f"✅ Good fit! RMSE = {rmse:.2f}% < 3%")
+            elif rmse < 5.0:
+                st.warning(f"⚠️ Acceptable fit. RMSE = {rmse:.2f}%")
+            else:
+                st.error(f"❌ Poor fit. RMSE = {rmse:.2f}%. Adjust parameters.")
+        else:
+            st.info("👈 Adjust parameters and click **Run Lab Simulation**")
+
+# ============================================================================
+# TAB 3: INDUSTRIAL SCALE-UP
+# ============================================================================
+with tab3:
+    st.header("🏭 Industrial Scale-Up Optimization")
+    
+    if not st.session_state.calibration_done:
+        st.warning("⚠️ Please calibrate kinetics in the **Lab Calibration** tab first!")
+    else:
+        st.success(f"✅ Using calibrated kinetics: A={st.session_state.calibrated_A:.2e}, Ea={st.session_state.calibrated_Ea/1000:.0f} kJ/mol")
+        
+        st.markdown("""
+        **Objective:** Find optimal reactor geometry (D, L) for industrial scale.
+        
+        **Constraints:**
+        - L/D ratio: 1-3
+        - Target H₂: 30%
+        - Max pressure drop: 50 kPa
+        """)
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.markdown("### Configuration")
+            
+            st.markdown(f"""
+            **Given:**
+            - Flow rate: {INDUSTRIAL_CONFIG.flow_rate_LPM} LPM
+            - Catalyst mass: {INDUSTRIAL_CONFIG.catalyst_mass_kg} kg
+            - Particle size: {INDUSTRIAL_CONFIG.particle_size_um} μm
+            """)
+            
+            LD_select = st.slider(
+                "Select L/D Ratio",
+                min_value=1.0, max_value=3.0,
+                value=2.0, step=0.1,
+                key="LD_select"
             )
             
-            st.session_state.fitted_kd[selected_temp] = best_kd
-            st.success(f"✅ Best kd = {best_kd:.4f} (RMSE = {best_rmse:.2f}%)")
-            st.rerun()
+            if st.button("🚀 Optimize Geometry", type="primary", use_container_width=True):
+                with st.spinner("Running industrial optimization..."):
+                    scaleup = IndustrialScaleUp(
+                        calibrated_A=st.session_state.calibrated_A,
+                        calibrated_Ea=st.session_state.calibrated_Ea,
+                        calibrated_kd=st.session_state.calibrated_kd,
+                    )
+                    
+                    # Parametric study
+                    parametric = scaleup.parametric_study(n_points=21)
+                    
+                    # Optimal result
+                    optimal = scaleup.optimize_geometry()
+                    
+                    st.session_state.industrial_results = {
+                        'parametric': parametric,
+                        'optimal': optimal,
+                    }
+                
+                st.success("✅ Optimization complete!")
+            
+            if st.button("📊 Evaluate Selected L/D", use_container_width=True):
+                with st.spinner("Evaluating..."):
+                    scaleup = IndustrialScaleUp(
+                        calibrated_A=st.session_state.calibrated_A,
+                        calibrated_Ea=st.session_state.calibrated_Ea,
+                        calibrated_kd=st.session_state.calibrated_kd,
+                    )
+                    result = scaleup.evaluate_geometry(LD_select)
+                    
+                    st.markdown("### Selected Geometry Results")
+                    st.markdown(f"""
+                    | Parameter | Value |
+                    |-----------|-------|
+                    | **Diameter** | {result['diameter_cm']:.1f} cm |
+                    | **Height** | {result['height_cm']:.1f} cm |
+                    | **L/D Ratio** | {result['LD_ratio']:.1f} |
+                    | **H₂ Outlet** | {result['H2_percent']:.2f}% |
+                    | **Conversion** | {result['conversion_percent']:.2f}% |
+                    | **ΔP** | {result['pressure_drop_kPa']:.2f} kPa |
+                    | **Meets H₂ Target** | {'✅' if result['meets_H2_target'] else '❌'} |
+                    | **Pressure OK** | {'✅' if result['meets_pressure'] else '❌'} |
+                    """)
+        
+        with col2:
+            if st.session_state.industrial_results is not None:
+                results = st.session_state.industrial_results
+                parametric = results['parametric']
+                optimal = results['optimal']
+                
+                st.markdown("### 🏆 Optimal Design")
+                
+                o1, o2, o3 = st.columns(3)
+                o1.metric("Diameter", f"{optimal.optimal_diameter_m*100:.1f} cm")
+                o2.metric("Height", f"{optimal.optimal_height_m*100:.1f} cm")
+                o3.metric("L/D Ratio", f"{optimal.optimal_LD_ratio:.2f}")
+                
+                o4, o5, o6 = st.columns(3)
+                o4.metric("H₂ Outlet", f"{optimal.predicted_H2_percent:.2f}%", 
+                         delta=f"{optimal.predicted_H2_percent-30:.1f}% from target")
+                o5.metric("Conversion", f"{optimal.predicted_conversion:.2f}%")
+                o6.metric("Pressure Drop", f"{optimal.pressure_drop_kPa:.2f} kPa")
+                
+                if optimal.meets_target and optimal.meets_pressure_constraint:
+                    st.success("✅ Optimal design meets all constraints!")
+                elif not optimal.meets_target:
+                    st.warning(f"⚠️ H₂ target not met. Consider adjusting parameters.")
+                elif not optimal.meets_pressure_constraint:
+                    st.warning(f"⚠️ Pressure drop exceeds limit.")
+                
+                # Parametric study plot
+                st.markdown("### Parametric Study: L/D vs Performance")
+                
+                fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+                
+                LD_vals = [p['LD_ratio'] for p in parametric]
+                H2_vals = [p['H2_percent'] for p in parametric]
+                conv_vals = [p['conversion_percent'] for p in parametric]
+                dP_vals = [p['pressure_drop_kPa'] for p in parametric]
+                
+                # H2
+                axes[0].plot(LD_vals, H2_vals, 'b-o', linewidth=2, markersize=6)
+                axes[0].axhline(y=30, color='green', linestyle='--', label='Target 30%')
+                axes[0].axvline(x=optimal.optimal_LD_ratio, color='red', linestyle=':', label='Optimal')
+                axes[0].set_xlabel('L/D Ratio')
+                axes[0].set_ylabel('H₂ Outlet [%]')
+                axes[0].set_title('H₂ vs L/D')
+                axes[0].legend()
+                axes[0].grid(True, alpha=0.3)
+                
+                # Conversion
+                axes[1].plot(LD_vals, conv_vals, 'g-o', linewidth=2, markersize=6)
+                axes[1].axvline(x=optimal.optimal_LD_ratio, color='red', linestyle=':', label='Optimal')
+                axes[1].set_xlabel('L/D Ratio')
+                axes[1].set_ylabel('Conversion [%]')
+                axes[1].set_title('Conversion vs L/D')
+                axes[1].legend()
+                axes[1].grid(True, alpha=0.3)
+                
+                # Pressure drop
+                axes[2].plot(LD_vals, dP_vals, 'r-o', linewidth=2, markersize=6)
+                axes[2].axhline(y=50, color='orange', linestyle='--', label='Max 50 kPa')
+                axes[2].axvline(x=optimal.optimal_LD_ratio, color='red', linestyle=':', label='Optimal')
+                axes[2].set_xlabel('L/D Ratio')
+                axes[2].set_ylabel('Pressure Drop [kPa]')
+                axes[2].set_title('ΔP vs L/D')
+                axes[2].legend()
+                axes[2].grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+                
+                # Geometry table
+                st.markdown("### All Geometries Evaluated")
+                geom_df = pd.DataFrame(parametric)
+                geom_df = geom_df[['LD_ratio', 'diameter_cm', 'height_cm', 
+                                   'H2_percent', 'conversion_percent', 'pressure_drop_kPa',
+                                   'meets_H2_target', 'meets_pressure']]
+                geom_df.columns = ['L/D', 'D (cm)', 'L (cm)', 'H₂ (%)', 'Conv (%)', 'ΔP (kPa)', 'H₂ OK', 'ΔP OK']
+                st.dataframe(geom_df.style.format({
+                    'L/D': '{:.1f}',
+                    'D (cm)': '{:.1f}',
+                    'L (cm)': '{:.1f}',
+                    'H₂ (%)': '{:.2f}',
+                    'Conv (%)': '{:.2f}',
+                    'ΔP (kPa)': '{:.2f}',
+                }), use_container_width=True, hide_index=True)
+            else:
+                st.info("👈 Click **Optimize Geometry** to find optimal design")
+
+# ============================================================================
+# TAB 4: COMPARISON
+# ============================================================================
+with tab4:
+    st.header("📈 Lab vs Industrial Comparison")
     
-    # Run transient simulation
-    if run_transient:
-        with st.spinner("Running transient simulation..."):
-            # Create config
-            config = create_transient_config(temperature_C=selected_temp)
-            
-            # Create deactivation model
-            deact_params = DeactivationParams(k_d=k_d_value)
-            deact_model = DeactivationModel(deact_model_type, deact_params)
-            
-            # Run simulation
-            reactor = TransientReactor(config, deact_model)
-            results = reactor.solve(t_final_min=t_final, dt_min=1.0)
-            
-            # Store results
-            st.session_state.validation_results[selected_temp] = {
-                'model': results,
-                'k_d': k_d_value
-            }
+    if not st.session_state.calibration_done:
+        st.warning("⚠️ Please complete calibration first!")
+    elif st.session_state.industrial_results is None:
+        st.warning("⚠️ Please run industrial optimization first!")
+    else:
+        scaleup = IndustrialScaleUp(
+            calibrated_A=st.session_state.calibrated_A,
+            calibrated_Ea=st.session_state.calibrated_Ea,
+            calibrated_kd=st.session_state.calibrated_kd,
+        )
         
-        st.success("✅ Transient simulation complete!")
-    
-    # Display results
-    if selected_temp in st.session_state.validation_results:
-        st.markdown("---")
-        st.markdown("### 📊 Results Comparison")
+        optimal = st.session_state.industrial_results['optimal']
+        comparison = scaleup.compare_scales(industrial_LD=optimal.optimal_LD_ratio)
         
-        model_results = st.session_state.validation_results[selected_temp]['model']
-        exp_data = get_experimental_data(selected_temp)
+        st.markdown("### Scale-Up Summary")
         
-        # Calculate metrics
-        model_H2_at_exp = np.interp(exp_data['TOS_min'], model_results['time_min'], model_results['H2_percent'])
-        rmse = np.sqrt(np.mean((model_H2_at_exp - exp_data['H2_percent'])**2))
+        col1, col2, col3 = st.columns([1, 1, 1])
         
-        # Metrics
-        met1, met2, met3 = st.columns(3)
-        met1.metric("Temperature", f"{selected_temp} °C")
-        met2.metric("RMSE (H2%)", f"{rmse:.2f} %")
-        met3.metric("kd used", f"{st.session_state.validation_results[selected_temp]['k_d']:.4f}")
+        with col1:
+            st.markdown("#### 🔬 Lab Scale")
+            lab = comparison['lab']
+            st.markdown(f"""
+            | Parameter | Value |
+            |-----------|-------|
+            | Diameter | {lab['diameter_cm']:.1f} cm |
+            | Height | {lab['height_cm']:.2f} cm |
+            | Flow | {lab['flow_rate']} |
+            | Catalyst | {lab['catalyst_mass']} |
+            | **H₂ Outlet** | **{lab['H2_percent']:.2f}%** |
+            | **Conversion** | **{lab['conversion']:.2f}%** |
+            | ΔP | {lab['pressure_drop_kPa']:.3f} kPa |
+            """)
         
-        # Plot comparison
+        with col2:
+            st.markdown("#### 🏭 Industrial Scale")
+            ind = comparison['industrial']
+            st.markdown(f"""
+            | Parameter | Value |
+            |-----------|-------|
+            | Diameter | {ind['diameter_cm']:.1f} cm |
+            | Height | {ind['height_cm']:.1f} cm |
+            | L/D Ratio | {ind['LD_ratio']:.1f} |
+            | Flow | {ind['flow_rate']} |
+            | Catalyst | {ind['catalyst_mass']} |
+            | **H₂ Outlet** | **{ind['H2_percent']:.2f}%** |
+            | **Conversion** | **{ind['conversion']:.2f}%** |
+            | ΔP | {ind['pressure_drop_kPa']:.2f} kPa |
+            """)
+        
+        with col3:
+            st.markdown("#### 📊 Scale Factors")
+            sf = comparison['scale_factors']
+            st.markdown(f"""
+            | Parameter | Factor |
+            |-----------|--------|
+            | Flow Rate | {sf['flow']:.0f}x |
+            | Catalyst Mass | {sf['catalyst']:.0f}x |
+            | Diameter | {ind['diameter_cm']/lab['diameter_cm']:.1f}x |
+            | Height | {ind['height_cm']/lab['height_cm']:.1f}x |
+            """)
+        
+        # Visual comparison
+        st.markdown("### Visual Comparison")
+        
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
-        # H2 comparison
-        axes[0].plot(model_results['time_min'], model_results['H2_percent'], 'b-', lw=2, label='Model')
-        axes[0].scatter(exp_data['TOS_min'], exp_data['H2_percent'], c='red', s=80, marker='o', label='Experimental', zorder=5)
-        axes[0].set_xlabel('Time on Stream [min]')
-        axes[0].set_ylabel('H₂ Composition [%]')
-        axes[0].set_title(f'H₂ Composition at {selected_temp}°C')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
+        # Bar chart - Performance
+        metrics = ['H₂ (%)', 'Conversion (%)']
+        lab_vals = [lab['H2_percent'], lab['conversion']]
+        ind_vals = [ind['H2_percent'], ind['conversion']]
         
-        # Activity profile
-        axes[1].plot(model_results['time_min'], model_results['activity'], 'g-', lw=2)
-        axes[1].set_xlabel('Time on Stream [min]')
-        axes[1].set_ylabel('Catalyst Activity [-]')
-        axes[1].set_title('Catalyst Deactivation')
-        axes[1].set_ylim([0, 1.1])
-        axes[1].grid(True, alpha=0.3)
+        x = np.arange(len(metrics))
+        width = 0.35
+        
+        axes[0].bar(x - width/2, lab_vals, width, label='Lab', color='steelblue')
+        axes[0].bar(x + width/2, ind_vals, width, label='Industrial', color='darkorange')
+        axes[0].axhline(y=30, color='green', linestyle='--', linewidth=2, label='Target H₂')
+        axes[0].set_ylabel('Percentage')
+        axes[0].set_title('Performance Comparison')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(metrics)
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3, axis='y')
+        
+        # Reactor size comparison (schematic)
+        axes[1].set_xlim(0, 100)
+        axes[1].set_ylim(0, 100)
+        
+        # Lab reactor (small, left)
+        lab_scale = 5
+        axes[1].add_patch(plt.Rectangle((10, 40), lab['diameter_cm']*lab_scale, 
+                                         lab['height_cm']*lab_scale, 
+                                         facecolor='steelblue', edgecolor='black', linewidth=2))
+        axes[1].text(10 + lab['diameter_cm']*lab_scale/2, 35, 'Lab', ha='center', fontsize=10)
+        
+        # Industrial reactor (larger, right)
+        ind_scale = 0.8
+        rect_x = 50
+        rect_y = 20
+        axes[1].add_patch(plt.Rectangle((rect_x, rect_y), ind['diameter_cm']*ind_scale, 
+                                         ind['height_cm']*ind_scale, 
+                                         facecolor='darkorange', edgecolor='black', linewidth=2))
+        axes[1].text(rect_x + ind['diameter_cm']*ind_scale/2, rect_y - 5, 'Industrial', ha='center', fontsize=10)
+        
+        axes[1].set_title('Reactor Size (Not to Scale)')
+        axes[1].axis('off')
         
         plt.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
         
-        # Comparison table
-        st.markdown("#### Point-by-Point Comparison")
-        comparison_df = pd.DataFrame({
-            'TOS (min)': exp_data['TOS_min'],
-            'Exp H2 (%)': exp_data['H2_percent'],
-            'Model H2 (%)': model_H2_at_exp,
-            'Error (%)': model_H2_at_exp - exp_data['H2_percent'],
-            'Activity': np.interp(exp_data['TOS_min'], model_results['time_min'], model_results['activity'])
-        })
-        st.dataframe(comparison_df.style.format({
-            'Exp H2 (%)': '{:.2f}',
-            'Model H2 (%)': '{:.2f}',
-            'Error (%)': '{:+.2f}',
-            'Activity': '{:.3f}'
-        }), use_container_width=True, hide_index=True)
+        # Download report
+        st.markdown("### 📥 Export Results")
         
-        # Download
+        report_data = {
+            'Parameter': ['Temperature', 'Target H2', 'Lab Diameter', 'Lab Height', 
+                         'Industrial Diameter', 'Industrial Height', 'Industrial L/D',
+                         'Lab H2%', 'Industrial H2%', 'Flow Scale Factor', 'Catalyst Scale Factor'],
+            'Value': ['800°C', '30%', f"{lab['diameter_cm']:.1f} cm", f"{lab['height_cm']:.2f} cm",
+                     f"{ind['diameter_cm']:.1f} cm", f"{ind['height_cm']:.1f} cm", f"{ind['LD_ratio']:.1f}",
+                     f"{lab['H2_percent']:.2f}%", f"{ind['H2_percent']:.2f}%",
+                     f"{sf['flow']:.0f}x", f"{sf['catalyst']:.0f}x"],
+        }
+        report_df = pd.DataFrame(report_data)
+        
         st.download_button(
-            "💾 Download Comparison CSV",
-            comparison_df.to_csv(index=False),
-            f"validation_{selected_temp}C.csv",
+            "📥 Download Scale-Up Report",
+            report_df.to_csv(index=False),
+            "scaleup_report.csv",
             "text/csv"
         )
-    
-    # Multi-temperature comparison
-    st.markdown("---")
-    st.markdown("### 🌡️ All Temperatures Comparison")
-    
-    if st.button("▶️ Run All Temperatures", use_container_width=True):
-        progress = st.progress(0)
-        status = st.empty()
-        
-        for i, temp in enumerate(available_temps):
-            status.text(f"Running {temp}°C...")
-            
-            config = create_transient_config(temperature_C=temp)
-            kd = st.session_state.fitted_kd.get(temp, 0.01)
-            deact_params = DeactivationParams(k_d=kd)
-            deact_model = DeactivationModel('first_order', deact_params)
-            
-            reactor = TransientReactor(config, deact_model)
-            results = reactor.solve(t_final_min=210, dt_min=1.0)
-            
-            st.session_state.validation_results[temp] = {
-                'model': results,
-                'k_d': kd
-            }
-            
-            progress.progress((i + 1) / len(available_temps))
-        
-        status.text("✅ All simulations complete!")
-    
-    # Plot all temperatures
-    if len(st.session_state.validation_results) == len(available_temps):
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        colors = {'770': 'blue', '800': 'orange', '830': 'gray'}
-        
-        for temp in available_temps:
-            model = st.session_state.validation_results[temp]['model']
-            exp = get_experimental_data(temp)
-            color = colors.get(str(temp), 'black')
-            
-            ax.plot(model['time_min'], model['H2_percent'], '-', color=color, lw=2, label=f'Model {temp}°C')
-            ax.scatter(exp['TOS_min'], exp['H2_percent'], c=color, s=60, marker='o', label=f'Exp {temp}°C')
-        
-        ax.set_xlabel('Time on Stream [min]', fontsize=12)
-        ax.set_ylabel('H₂ Composition [%]', fontsize=12)
-        ax.set_title('Model vs Experimental - All Temperatures', fontsize=14)
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        st.pyplot(fig)
-        plt.close(fig)
 
 # ============================================================================
-# TAB 3: OPTIMIZER
+# TAB 5: ASSUMPTIONS
 # ============================================================================
-with tab_opt:
-    st.subheader("🎯 Bayesian Optimization")
-    st.markdown("Find optimal operating conditions using AI-powered search.")
+with tab5:
+    st.header("📋 Model Assumptions & Documentation")
     
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.markdown("#### Select Optimization Goal")
-        template_names = get_template_names()
-        selected_template_key = st.selectbox(
-            "Choose a preset:",
-            options=list(template_names.keys()),
-            format_func=lambda x: template_names[x],
-            key="opt_template"
-        )
-        
-        template = get_template(selected_template_key)
-        st.info(f"**{template['description']}**")
-        
-        n_iterations = st.slider("Iterations", 10, 100, template['suggested_iterations'], key="opt_iter")
-    
-    with col2:
-        st.markdown("#### Variable Bounds")
-        variable_bounds = {}
-        for var in template['variables']:
-            c1, c2 = st.columns(2)
-            with c1:
-                min_val = st.number_input(f"{var['label']} Min", value=float(var['min']), key=f"opt_min_{var['key']}")
-            with c2:
-                max_val = st.number_input(f"{var['label']} Max", value=float(var['max']), key=f"opt_max_{var['key']}")
-            variable_bounds[var['key']] = (min_val, max_val)
-    
-    if st.button("🚀 Start Optimization", type="primary", use_container_width=True):
-        base_config = get_base_config_from_session(st.session_state)
-        variable_names = list(variable_bounds.keys())
-        bounds = list(variable_bounds.values())
-        
-        config = OptimizationConfig(
-            variable_names=variable_names,
-            bounds=bounds,
-            n_iterations=n_iterations,
-            n_initial_points=min(5, n_iterations // 3),
-            maximize=(template['objective']['direction'] == 'maximize')
-        )
-        
-        objective_fn = create_objective_function(
-            MethaneDecompositionReactor,
-            base_config,
-            variable_names,
-            template['objective']['target']
-        )
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        def update_callback(iteration, params, value):
-            progress_bar.progress(iteration / n_iterations)
-            status_text.write(f"🔄 Iteration {iteration}/{n_iterations} | Value: {value:.4f}")
-        
-        optimizer = BayesianOptimizer(config)
-        
-        with st.spinner("Running optimization..."):
-            result = optimizer.optimize(objective_fn, callback=update_callback)
-        
-        st.session_state.optimization_result = result
-        progress_bar.progress(1.0)
-        status_text.write("✅ Optimization Complete!")
-        st.success(f"**Best Value: {result.best_value:.4f}**")
-    
-    if st.session_state.optimization_result:
-        result = st.session_state.optimization_result
-        
-        st.markdown("---")
-        st.markdown("### 🏆 Results")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### Best Parameters")
-            for param, value in result.best_params.items():
-                st.metric(param, f"{value:.2f}")
-        
-        with col2:
-            st.markdown("#### Convergence")
-            fig = create_convergence_plot(result.convergence, result.best_so_far)
-            st.pyplot(fig)
-            plt.close(fig)
-
-# ============================================================================
-# TAB 4: AI ASSISTANT
-# ============================================================================
-with tab_chat:
-    st.subheader("🤖 AI Assistant")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    if col1.button("📊 Analyze", use_container_width=True):
-        handle_ai_request("Analyze the current simulation results.")
-    if col2.button("🔧 Optimize Tips", use_container_width=True):
-        handle_ai_request("How to optimize H2 yield?")
-    if col3.button("📚 Explain", use_container_width=True):
-        handle_ai_request("Explain methane decomposition kinetics.")
-    if col4.button("🗑️ Clear", use_container_width=True):
-        st.session_state.chat_history = []
-        st.rerun()
+    st.markdown(get_assumptions_text())
     
     st.markdown("---")
+    st.markdown("### Model Equations")
     
-    chat_container = st.container(height=400)
-    for msg in st.session_state.chat_history:
-        with chat_container:
-            st.chat_message(msg["role"]).write(msg["content"])
+    with st.expander("📐 Reactor Model"):
+        st.markdown("""
+        **Species Balance (Plug Flow):**
+        $$\\frac{dF_{CH_4}}{dz} = -r_{bed} \\cdot A_c$$
+        $$\\frac{dF_{H_2}}{dz} = +2 \\cdot r_{bed} \\cdot A_c$$
+        
+        **Reaction Rate:**
+        $$r_{bed} = k(T) \\cdot a(t) \\cdot \\eta \\cdot C_{CH_4} \\cdot (1-\\varepsilon)$$
+        
+        **Arrhenius Rate Constant:**
+        $$k(T) = A \\cdot \\exp\\left(-\\frac{E_a}{RT}\\right)$$
+        """)
     
-    if prompt := st.chat_input("Ask about the simulation..."):
-        handle_ai_request(prompt)
-        st.rerun()
+    with st.expander("⚡ Deactivation Model"):
+        st.markdown("""
+        **First-Order Deactivation:**
+        $$\\frac{da}{dt} = -k_d \\cdot a$$
+        
+        **Solution:**
+        $$a(t) = \\exp(-k_d \\cdot t)$$
+        
+        Where:
+        - $a$ = catalyst activity (0 to 1)
+        - $k_d$ = deactivation rate constant [1/min]
+        """)
+    
+    with st.expander("📏 Pressure Drop (Ergun Equation)"):
+        st.markdown("""
+        $$-\\frac{dP}{dz} = \\frac{150\\mu(1-\\varepsilon)^2}{d_p^2\\varepsilon^3}u + \\frac{1.75\\rho(1-\\varepsilon)}{d_p\\varepsilon^3}u^2$$
+        
+        Where:
+        - $\\mu$ = gas viscosity
+        - $\\varepsilon$ = bed porosity
+        - $d_p$ = particle diameter
+        - $u$ = superficial velocity
+        - $\\rho$ = gas density
+        """)
 
 # ============================================================================
 # FOOTER
 # ============================================================================
 st.markdown("---")
-st.caption("Anukaran AI © 2024 | Methane Decomposition Reactor Simulator | Steady-State + Transient + Optimization")
+st.markdown("""
+<div style='text-align: center; color: gray;'>
+    <p>Anukaran AI © 2024 | Methane Decomposition Reactor Scale-Up Tool</p>
+    <p>Temperature: 800°C | Target H₂: 30% | Lab → Industrial</p>
+</div>
+""", unsafe_allow_html=True)
