@@ -93,6 +93,9 @@ other_defaults = {
     'industrial_transient_results': None,
     'chat_history': [],
     'auto_insight': '',
+    'calibrated_A_value': 5.0e4,      # Add this
+    'calibrated_Ea_value': 150.0,      # Add this
+    'calibrated_kd_value': 0.008,      # Add this
 }
 
 for key, value in other_defaults.items():
@@ -227,8 +230,11 @@ INDUSTRIAL_CONFIG = DynamicIndustrialConfig()
 
 def create_lab_reactor_config(A: float = None, Ea: float = None):
     """Create ReactorConfig for lab scale using current session state values"""
-    A = A or st.session_state.pre_exponential
-    Ea = Ea or st.session_state.activation_energy * 1000  # kJ to J
+    # Use calibrated values if available, otherwise use defaults
+    if A is None:
+        A = st.session_state.get('calibrated_A_value', st.session_state.pre_exponential)
+    if Ea is None:
+        Ea = st.session_state.get('calibrated_Ea_value', st.session_state.activation_energy) * 1000
     
     return ReactorConfig(
         diameter_m=st.session_state.lab_diameter / 100,
@@ -251,8 +257,10 @@ def create_lab_reactor_config(A: float = None, Ea: float = None):
 
 def create_industrial_reactor_config(diameter_m: float, height_m: float, A: float = None, Ea: float = None):
     """Create ReactorConfig for industrial scale"""
-    A = A or st.session_state.pre_exponential
-    Ea = Ea or st.session_state.activation_energy * 1000
+    if A is None:
+        A = st.session_state.get('calibrated_A_value', st.session_state.pre_exponential)
+    if Ea is None:
+        Ea = st.session_state.get('calibrated_Ea_value', st.session_state.activation_energy) * 1000
     
     return ReactorConfig(
         diameter_m=diameter_m,
@@ -265,13 +273,12 @@ def create_industrial_reactor_config(diameter_m: float, height_m: float, A: floa
         catalyst_mass_kg=st.session_state.ind_catalyst_mass,
         temperature_K=st.session_state.temperature + 273.15,
         inlet_pressure_Pa=st.session_state.inlet_pressure * 1e5,
-        flow_rate_m3_s=st.session_state.ind_flow_rate / 60 / 1000,  # LPM to m³/s
+        flow_rate_m3_s=st.session_state.ind_flow_rate / 60 / 1000,
         y_CH4_in=st.session_state.inlet_CH4 / 100,
         y_H2_in=0.0,
         pre_exponential=A,
         activation_energy=Ea,
     )
-
 
 # ============================================================================
 # AI ASSISTANT FUNCTIONS
@@ -655,6 +662,9 @@ with tabs[0]:
 # ============================================================================
 # TAB 2: LAB CALIBRATION
 # ============================================================================
+# ============================================================================
+# TAB 2: LAB CALIBRATION
+# ============================================================================
 with tabs[1]:
     st.header("🔬 Lab Scale Kinetic Calibration")
     
@@ -667,15 +677,15 @@ with tabs[1]:
     
     with col1:
         st.markdown("### Kinetic Parameters")
-        st.markdown("*Adjust in sidebar or here:*")
+        st.markdown("*Adjust values for calibration:*")
         
-        # Local sliders for quick adjustment
+        # Use temporary keys for local sliders (not bound to session state)
         A_local = st.slider(
             "Pre-exponential (log₁₀ A)",
             min_value=3.0, max_value=8.0,
             value=np.log10(st.session_state.pre_exponential),
             step=0.1,
-            key="A_slider_local"
+            key="A_calibration_slider"  # Different key
         )
         A_value = 10 ** A_local
         st.code(f"A = {A_value:.2e} 1/s")
@@ -683,27 +693,28 @@ with tabs[1]:
         Ea_local = st.slider(
             "Activation Energy [kJ/mol]",
             min_value=80.0, max_value=300.0,
-            value=st.session_state.activation_energy,
+            value=float(st.session_state.activation_energy),
             step=5.0,
-            key="Ea_slider_local"
+            key="Ea_calibration_slider"  # Different key
         )
         
         kd_local = st.slider(
             "Deactivation kd [1/min]",
             min_value=0.001, max_value=0.1,
-            value=st.session_state.deactivation_kd,
+            value=float(st.session_state.deactivation_kd),
             step=0.001,
             format="%.4f",
-            key="kd_slider_local"
+            key="kd_calibration_slider"  # Different key
         )
         
-        if st.button("▶️ Run Lab Simulation", type="primary", use_container_width=True):
+        run_calibration = st.button("▶️ Run Lab Simulation", type="primary", use_container_width=True)
+        
+    with col2:
+        st.markdown("### Model vs Experimental")
+        
+        # Run simulation if button clicked
+        if run_calibration:
             with st.spinner("Running simulation..."):
-                # Update session state
-                st.session_state.pre_exponential = A_value
-                st.session_state.activation_energy = Ea_local
-                st.session_state.deactivation_kd = kd_local
-                
                 # Create config and run
                 config = create_lab_reactor_config(A=A_value, Ea=Ea_local*1000)
                 deact = DeactivationModel('first_order', DeactivationParams(k_d=kd_local))
@@ -712,6 +723,11 @@ with tabs[1]:
                 
                 st.session_state.lab_results = results
                 st.session_state.calibration_done = True
+                
+                # Store calibrated values in separate keys (not widget-bound)
+                st.session_state['calibrated_A_value'] = A_value
+                st.session_state['calibrated_Ea_value'] = Ea_local
+                st.session_state['calibrated_kd_value'] = kd_local
                 
                 # Get closest experimental data
                 closest_temp = min(get_available_temperatures(), 
@@ -728,10 +744,8 @@ with tabs[1]:
             
             st.success("✅ Calibration complete!")
             st.rerun()
-    
-    with col2:
-        st.markdown("### Model vs Experimental")
         
+        # Display results
         if st.session_state.lab_results is not None:
             results = st.session_state.lab_results
             closest_temp = min(get_available_temperatures(), 
@@ -773,7 +787,7 @@ with tabs[1]:
                 }), use_container_width=True, hide_index=True)
         else:
             st.info("👈 Adjust parameters and click **Run Lab Simulation**")
-
+            
 # ============================================================================
 # TAB 3: TRANSIENT ANALYSIS
 # ============================================================================
@@ -1299,6 +1313,7 @@ with col_btn:
         if user_input:
             handle_chat(user_input)
             st.rerun()
+
 
 # ============================================================================
 # FOOTER
