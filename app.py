@@ -781,4 +781,3 @@ with col_send:
 # ============================================================================
 st.markdown("---")
 st.caption("Anukaran AI © 2024 | Methane Decomposition Reactor Scale-Up | 800°C | Target H₂: 30%")
-```
