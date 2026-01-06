@@ -45,35 +45,35 @@ st.set_page_config(
 # ============================================================================
 DEFAULTS = {
     # Lab Scale
-    'lab_flow_rate': 75.0,
-    'lab_diameter': 1.8,
-    'lab_bed_height': 2.59,
-    'lab_catalyst_mass': 2.2,
-    'lab_particle_size': 10.0,
-    'lab_particle_density': 2821.56,
+    'lab_flow_rate': 75.0,          # mL/min
+    'lab_diameter': 1.8,            # cm
+    'lab_bed_height': 2.59,         # cm
+    'lab_catalyst_mass': 2.2,       # g
+    'lab_particle_size': 10.0,      # μm - fine powder for lab
+    'lab_particle_density': 2821.56, # kg/m³
     
     # Industrial Scale
-    'ind_flow_rate': 1960.0,
-    'ind_catalyst_mass': 57.0,
-    'ind_particle_size': 10.0,
-    'ind_particle_density': 2821.56,
+    'ind_flow_rate': 1960.0,        # LPM
+    'ind_catalyst_mass': 57.0,      # kg
+    'ind_particle_size': 3000.0,    # μm = 3mm - Industrial uses larger particles!
+    'ind_particle_density': 2821.56, # kg/m³
     'ind_LD_min': 1.0,
     'ind_LD_max': 3.0,
-    'ind_target_H2': 30.0,
-    'ind_max_dP': 50.0,
+    'ind_target_H2': 30.0,          # %
+    'ind_max_dP': 50.0,             # kPa
     
     # Assumed Parameters
     'bed_porosity': 0.4,
     'particle_porosity': 0.5,
     'tortuosity': 3.0,
-    'inlet_pressure': 1.0,
-    'temperature': 800.0,
-    'inlet_CH4': 100.0,
+    'inlet_pressure': 1.0,          # bar
+    'temperature': 800.0,           # °C
+    'inlet_CH4': 100.0,             # %
     
-    # Kinetics
-    'pre_exponential': 5.0e4,
-    'activation_energy': 150.0,
-    'deactivation_kd': 0.008,
+    # Kinetics (Initial guesses)
+    'pre_exponential': 5.0e4,       # 1/s
+    'activation_energy': 150.0,     # kJ/mol
+    'deactivation_kd': 0.008,       # 1/min
 }
 
 # ============================================================================
@@ -115,40 +115,24 @@ except:
 def calculate_carbon_rate(conversion, flow_rate_mol_s, catalyst_mass_kg):
     """
     Calculate carbon deposition rate.
-    
     CH₄ → C + 2H₂
     1 mol CH₄ produces 1 mol C (12 g/mol)
-    
     Returns: carbon deposition rate in g/h per kg catalyst
     """
-    # Moles CH4 converted per second
     mol_CH4_converted = conversion * flow_rate_mol_s
-    
-    # Carbon produced (g/s) - MW of C = 12 g/mol
     carbon_rate_g_s = mol_CH4_converted * 12.0
-    
-    # Per kg catalyst, per hour
     carbon_rate_g_h_kg = (carbon_rate_g_s * 3600) / catalyst_mass_kg
-    
     return carbon_rate_g_h_kg
 
 
 def calculate_cumulative_carbon(time_min, conversion_array, flow_rate_mol_s, catalyst_mass_kg):
     """Calculate cumulative carbon deposited over time"""
-    # Carbon rate at each time point (mol/s)
     mol_CH4_converted = conversion_array * flow_rate_mol_s
-    carbon_mol_s = mol_CH4_converted  # 1:1 stoichiometry
-    
-    # Integrate over time (convert min to s)
+    carbon_mol_s = mol_CH4_converted
     dt_s = (time_min[1] - time_min[0]) * 60 if len(time_min) > 1 else 60
     cumulative_carbon_mol = np.cumsum(carbon_mol_s) * dt_s
-    
-    # Convert to grams
     cumulative_carbon_g = cumulative_carbon_mol * 12.0
-    
-    # Per kg catalyst
     cumulative_carbon_g_per_kg = cumulative_carbon_g / catalyst_mass_kg
-    
     return cumulative_carbon_g_per_kg
 
 
@@ -183,16 +167,25 @@ def create_lab_reactor_config(A: float = None, Ea: float = None):
 
 
 def create_industrial_reactor_config(diameter_m: float, height_m: float, A: float = None, Ea: float = None):
-    """Create ReactorConfig for industrial scale"""
+    """
+    Create ReactorConfig for industrial scale.
+    
+    Note: Industrial reactors use larger particles (1-5 mm) compared to lab (10 μm)
+    to maintain reasonable pressure drop at high flow rates.
+    """
     if A is None:
         A = st.session_state.get('calibrated_A_value', st.session_state.pre_exponential)
     if Ea is None:
         Ea = st.session_state.get('calibrated_Ea_value', st.session_state.activation_energy) * 1000
     
+    # Convert units properly
+    particle_diameter_m = st.session_state.ind_particle_size * 1e-6  # μm to m
+    flow_rate_m3_s = st.session_state.ind_flow_rate / 60 / 1000      # LPM to m³/s
+    
     return ReactorConfig(
         diameter_m=diameter_m,
         bed_height_m=height_m,
-        particle_diameter_m=st.session_state.ind_particle_size * 1e-6,
+        particle_diameter_m=particle_diameter_m,
         particle_density=st.session_state.ind_particle_density,
         particle_porosity=st.session_state.particle_porosity,
         tortuosity=st.session_state.tortuosity,
@@ -200,7 +193,7 @@ def create_industrial_reactor_config(diameter_m: float, height_m: float, A: floa
         catalyst_mass_kg=st.session_state.ind_catalyst_mass,
         temperature_K=st.session_state.temperature + 273.15,
         inlet_pressure_Pa=st.session_state.inlet_pressure * 1e5,
-        flow_rate_m3_s=st.session_state.ind_flow_rate / 60 / 1000,
+        flow_rate_m3_s=flow_rate_m3_s,
         y_CH4_in=st.session_state.inlet_CH4 / 100,
         y_H2_in=0.0,
         pre_exponential=A,
@@ -210,10 +203,10 @@ def create_industrial_reactor_config(diameter_m: float, height_m: float, A: floa
 
 def get_molar_flow_rate(flow_rate_mL_min, pressure_Pa, temperature_K):
     """Calculate molar flow rate from volumetric flow"""
-    R = 8.314  # J/(mol·K)
+    R = 8.314
     flow_rate_m3_s = flow_rate_mL_min / 60 / 1e6
-    C_total = pressure_Pa / (R * temperature_K)  # mol/m³
-    return flow_rate_m3_s * C_total  # mol/s
+    C_total = pressure_Pa / (R * temperature_K)
+    return flow_rate_m3_s * C_total
 
 
 # ============================================================================
@@ -258,6 +251,7 @@ def generate_auto_insight(action: str, results: dict = None) -> str:
         return f"""**🏭 Industrial Optimization**
 - Optimal: D={results.get('diameter', 0):.1f}cm, L={results.get('height', 0):.1f}cm
 - H₂: **{results.get('H2', 0):.2f}%** | ΔP: {results.get('dP', 0):.1f} kPa
+- Particle: {st.session_state.ind_particle_size} μm ({st.session_state.ind_particle_size/1000:.1f} mm)
 - 💡 {'✅ Target met!' if results.get('H2', 0) >= st.session_state.ind_target_H2 else '⚠️ Below target'}"""
 
     return "👋 Welcome! Run simulations to get insights."
@@ -267,7 +261,8 @@ def get_context_string() -> str:
     parts = [
         f"Reaction: CH₄ → C + 2H₂",
         f"Temperature: {st.session_state.temperature}°C, Target H₂: {st.session_state.ind_target_H2}%",
-        f"Lab: D={st.session_state.lab_diameter}cm, L={st.session_state.lab_bed_height}cm, Flow={st.session_state.lab_flow_rate}mL/min",
+        f"Lab: D={st.session_state.lab_diameter}cm, L={st.session_state.lab_bed_height}cm, Flow={st.session_state.lab_flow_rate}mL/min, Particle={st.session_state.lab_particle_size}μm",
+        f"Industrial: Flow={st.session_state.ind_flow_rate}LPM, Particle={st.session_state.ind_particle_size}μm ({st.session_state.ind_particle_size/1000:.1f}mm)",
     ]
     if st.session_state.calibration_done:
         parts.append(f"Calibrated: A={st.session_state.calibrated_A_value:.2e}, Ea={st.session_state.calibrated_Ea_value:.0f}kJ/mol")
@@ -289,7 +284,6 @@ def plot_experiment_data(exp_data, target_H2):
     """Plot experimental data: H2, CH4 vs time"""
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     
-    # H2 plot
     axes[0].plot(exp_data['TOS_min'], exp_data['H2_percent'], 'bo-', markersize=8, linewidth=2, label='H₂ (Experimental)')
     axes[0].axhline(y=target_H2, color='green', linestyle='--', linewidth=2, label=f'Target ({target_H2}%)')
     axes[0].fill_between(exp_data['TOS_min'], exp_data['H2_percent'], alpha=0.3)
@@ -300,7 +294,6 @@ def plot_experiment_data(exp_data, target_H2):
     axes[0].grid(True, alpha=0.3)
     axes[0].set_ylim([0, max(45, exp_data['H2_percent'].max() + 5)])
     
-    # CH4 plot
     axes[1].plot(exp_data['TOS_min'], exp_data['CH4_percent'], 'rs-', markersize=8, linewidth=2, label='CH₄ (Experimental)')
     axes[1].fill_between(exp_data['TOS_min'], exp_data['CH4_percent'], alpha=0.3, color='red')
     axes[1].set_xlabel('Time on Stream [min]')
@@ -321,12 +314,9 @@ def plot_transient_results(results, target_H2, catalyst_mass_kg, flow_mol_s, tit
     H2 = results['H2_percent']
     CH4 = results['CH4_percent']
     activity = results['activity']
-    conversion = results['conversion'] / 100  # Convert to fraction
+    conversion = results['conversion'] / 100
     
-    # Calculate carbon
-    cumulative_carbon = calculate_cumulative_carbon(
-        time, conversion, flow_mol_s, catalyst_mass_kg
-    )
+    cumulative_carbon = calculate_cumulative_carbon(time, conversion, flow_mol_s, catalyst_mass_kg)
     
     # H2 vs Time
     axes[0, 0].plot(time, H2, 'b-', linewidth=2, label='H₂')
@@ -373,7 +363,6 @@ def plot_calibration_comparison(results, exp_data, target_H2):
     """Plot calibration: Model vs Experimental for H2 and CH4"""
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     
-    # H2 comparison
     axes[0].plot(results['time_min'], results['H2_percent'], 'b-', linewidth=2, label='Model')
     axes[0].scatter(exp_data['TOS_min'], exp_data['H2_percent'], c='red', s=100, zorder=5, label='Experimental')
     axes[0].axhline(y=target_H2, color='green', linestyle='--', linewidth=2, label=f'Target ({target_H2}%)')
@@ -384,7 +373,6 @@ def plot_calibration_comparison(results, exp_data, target_H2):
     axes[0].grid(True, alpha=0.3)
     axes[0].set_ylim([0, max(50, results['H2_percent'].max() + 5)])
     
-    # CH4 comparison
     axes[1].plot(results['time_min'], results['CH4_percent'], 'b-', linewidth=2, label='Model')
     axes[1].scatter(exp_data['TOS_min'], exp_data['CH4_percent'], c='red', s=100, zorder=5, label='Experimental')
     axes[1].set_xlabel('Time on Stream [min]')
@@ -406,7 +394,6 @@ def plot_parametric_study(parametric, optimal, target_H2, max_dP):
     conv = [p['conversion_percent'] for p in parametric]
     dP = [p['pressure_drop_kPa'] for p in parametric]
     
-    # H2 vs L/D
     axes[0].plot(LD, H2, 'b-o', markersize=6, linewidth=2)
     axes[0].axhline(y=target_H2, color='green', linestyle='--', linewidth=2, label=f'Target ({target_H2}%)')
     axes[0].axvline(x=optimal.optimal_LD_ratio, color='red', linestyle=':', linewidth=2, label=f'Optimal L/D={optimal.optimal_LD_ratio:.2f}')
@@ -416,7 +403,6 @@ def plot_parametric_study(parametric, optimal, target_H2, max_dP):
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     
-    # Conversion vs L/D
     axes[1].plot(LD, conv, 'g-o', markersize=6, linewidth=2)
     axes[1].axvline(x=optimal.optimal_LD_ratio, color='red', linestyle=':', linewidth=2, label='Optimal')
     axes[1].set_xlabel('L/D Ratio')
@@ -425,7 +411,6 @@ def plot_parametric_study(parametric, optimal, target_H2, max_dP):
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
     
-    # Pressure Drop vs L/D
     axes[2].plot(LD, dP, 'r-o', markersize=6, linewidth=2)
     axes[2].axhline(y=max_dP, color='orange', linestyle='--', linewidth=2, label=f'Max ({max_dP} kPa)')
     axes[2].axvline(x=optimal.optimal_LD_ratio, color='red', linestyle=':', linewidth=2, label='Optimal')
@@ -463,6 +448,8 @@ with st.sidebar:
         st.session_state.calibration_done = False
         st.session_state.lab_results = None
         st.session_state.industrial_results = None
+        st.session_state.lab_transient_results = None
+        st.session_state.industrial_transient_results = None
         st.rerun()
     
     st.markdown("---")
@@ -485,7 +472,8 @@ with st.sidebar:
         st.number_input("Catalyst Mass (g)", 0.1, 100.0,
                        value=st.session_state.lab_catalyst_mass, step=0.1, key="lab_catalyst_mass")
         st.number_input("Particle Size (μm)", 1.0, 1000.0,
-                       value=st.session_state.lab_particle_size, step=1.0, key="lab_particle_size")
+                       value=st.session_state.lab_particle_size, step=1.0, key="lab_particle_size",
+                       help="Lab scale uses fine powder (typically 10-100 μm)")
         st.number_input("Particle Density (kg/m³)", 1000.0, 5000.0,
                        value=st.session_state.lab_particle_density, step=10.0, key="lab_particle_density")
     
@@ -494,6 +482,11 @@ with st.sidebar:
                        value=st.session_state.ind_flow_rate, step=100.0, key="ind_flow_rate")
         st.number_input("Catalyst Mass (kg)", 1.0, 500.0,
                        value=st.session_state.ind_catalyst_mass, step=1.0, key="ind_catalyst_mass")
+        st.number_input("Particle Size (μm)", 100.0, 10000.0,
+                       value=st.session_state.ind_particle_size, step=100.0, key="ind_particle_size",
+                       help="Industrial reactors use larger particles (1-5 mm = 1000-5000 μm) for lower ΔP")
+        st.number_input("Particle Density (kg/m³)", 1000.0, 5000.0,
+                       value=st.session_state.ind_particle_density, step=10.0, key="ind_particle_density")
         st.number_input("Target H₂ (%)", 10.0, 50.0,
                        value=st.session_state.ind_target_H2, step=1.0, key="ind_target_H2")
         c1, c2 = st.columns(2)
@@ -503,6 +496,9 @@ with st.sidebar:
                        value=st.session_state.ind_LD_max, step=0.1, key="ind_LD_max")
         st.number_input("Max ΔP (kPa)", 10.0, 200.0,
                        value=st.session_state.ind_max_dP, step=5.0, key="ind_max_dP")
+        
+        # Show particle size comparison
+        st.caption(f"📊 Lab: {st.session_state.lab_particle_size} μm | Industrial: {st.session_state.ind_particle_size} μm ({st.session_state.ind_particle_size/1000:.1f} mm)")
     
     with st.expander("📐 Assumptions", expanded=False):
         st.number_input("Bed Porosity (ε)", 0.2, 0.6,
@@ -547,7 +543,6 @@ with tabs[0]:
     
     exp_data = get_experimental_data(closest_temp)
     
-    # Display data table
     col1, col2 = st.columns([1, 2])
     
     with col1:
@@ -573,7 +568,6 @@ with tabs[0]:
         st.pyplot(fig)
         plt.close(fig)
     
-    # Metrics
     st.markdown("### Key Metrics")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Initial H₂", f"{exp_data['H2_percent'][0]:.2f}%")
@@ -588,7 +582,8 @@ with tabs[1]:
     st.header("🔬 Lab Scale Kinetic Calibration")
     
     st.markdown(f"**Lab Setup:** T={st.session_state.temperature}°C, Flow={st.session_state.lab_flow_rate} mL/min, "
-                f"D={st.session_state.lab_diameter} cm, L={st.session_state.lab_bed_height} cm")
+                f"D={st.session_state.lab_diameter} cm, L={st.session_state.lab_bed_height} cm, "
+                f"Particle={st.session_state.lab_particle_size} μm")
     
     col1, col2 = st.columns([1, 2])
     
@@ -691,6 +686,7 @@ with tabs[2]:
         # LAB TRANSIENT
         with subtab1:
             st.markdown("### Lab Scale Time-Dependent Analysis")
+            st.caption(f"Particle size: {st.session_state.lab_particle_size} μm")
             
             col1, col2 = st.columns([1, 3])
             
@@ -712,7 +708,6 @@ with tabs[2]:
                 if st.session_state.lab_transient_results:
                     results = st.session_state.lab_transient_results
                     
-                    # Calculate flow rate for carbon calculation
                     flow_mol_s = get_molar_flow_rate(
                         st.session_state.lab_flow_rate,
                         st.session_state.inlet_pressure * 1e5,
@@ -729,7 +724,6 @@ with tabs[2]:
                     st.pyplot(fig)
                     plt.close(fig)
                     
-                    # Metrics
                     half_idx = np.argmin(np.abs(results['activity'] - 0.5))
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Initial H₂", f"{results['H2_percent'][0]:.2f}%")
@@ -740,6 +734,7 @@ with tabs[2]:
         # INDUSTRIAL TRANSIENT
         with subtab2:
             st.markdown("### Industrial Scale Time-Dependent Analysis")
+            st.caption(f"Particle size: {st.session_state.ind_particle_size} μm ({st.session_state.ind_particle_size/1000:.1f} mm)")
             
             if st.session_state.industrial_results is None:
                 st.warning("⚠️ Run **Industrial Scale-Up** optimization first!")
@@ -752,6 +747,7 @@ with tabs[2]:
 - D: {opt.optimal_diameter_m*100:.1f} cm
 - L: {opt.optimal_height_m*100:.1f} cm
 - L/D: {opt.optimal_LD_ratio:.2f}
+- Particle: {st.session_state.ind_particle_size} μm
 """)
                     
                     t_final_ind = st.slider("Time [min]", 60, 1000, 300, key="t_ind_trans")
@@ -774,7 +770,7 @@ with tabs[2]:
                         results = st.session_state.industrial_transient_results
                         
                         flow_mol_s = get_molar_flow_rate(
-                            st.session_state.ind_flow_rate * 1000,  # LPM to mL/min
+                            st.session_state.ind_flow_rate * 1000,
                             st.session_state.inlet_pressure * 1e5,
                             st.session_state.temperature + 273.15
                         ) * (st.session_state.inlet_CH4 / 100)
@@ -789,7 +785,6 @@ with tabs[2]:
                         st.pyplot(fig)
                         plt.close(fig)
                         
-                        # Time above target
                         below_target = results['H2_percent'] < st.session_state.ind_target_H2
                         if np.any(below_target):
                             regen_time = results['time_min'][np.argmax(below_target)]
@@ -823,10 +818,15 @@ with tabs[3]:
 |-----------|-------|
 | Flow Rate | {st.session_state.ind_flow_rate} LPM |
 | Catalyst | {st.session_state.ind_catalyst_mass} kg |
+| Particle Size | {st.session_state.ind_particle_size} μm ({st.session_state.ind_particle_size/1000:.1f} mm) |
 | Target H₂ | {st.session_state.ind_target_H2}% |
 | L/D Range | {st.session_state.ind_LD_min}-{st.session_state.ind_LD_max} |
 | Max ΔP | {st.session_state.ind_max_dP} kPa |
 """)
+            
+            # Warning if particle size is too small
+            if st.session_state.ind_particle_size < 500:
+                st.warning(f"⚠️ Particle size {st.session_state.ind_particle_size} μm may cause high ΔP. Consider using 1000-5000 μm for industrial scale.")
             
             if st.button("🚀 Optimize Reactor", type="primary", use_container_width=True):
                 with st.spinner("Optimizing..."):
@@ -855,42 +855,46 @@ with tabs[3]:
                                 'conversion_percent': results['outlet_conversion'],
                                 'pressure_drop_kPa': results['pressure_drop_kPa'],
                             })
-                        except:
+                        except Exception as e:
+                            st.warning(f"Error at L/D={LD:.2f}: {str(e)}")
                             continue
                     
-                    # Find optimal
-                    valid = [p for p in parametric 
-                            if p['H2_percent'] >= st.session_state.ind_target_H2 
-                            and p['pressure_drop_kPa'] <= st.session_state.ind_max_dP]
-                    
-                    if valid:
-                        best = min(valid, key=lambda x: x['pressure_drop_kPa'])
+                    if not parametric:
+                        st.error("❌ No valid configurations found. Check particle size and flow rate.")
                     else:
-                        best = min(parametric, key=lambda x: abs(x['H2_percent'] - st.session_state.ind_target_H2))
+                        # Find optimal
+                        valid = [p for p in parametric 
+                                if p['H2_percent'] >= st.session_state.ind_target_H2 
+                                and p['pressure_drop_kPa'] <= st.session_state.ind_max_dP]
+                        
+                        if valid:
+                            best = min(valid, key=lambda x: x['pressure_drop_kPa'])
+                        else:
+                            best = min(parametric, key=lambda x: abs(x['H2_percent'] - st.session_state.ind_target_H2))
+                        
+                        optimal = ScaleUpResult(
+                            optimal_diameter_m=best['diameter_cm'] / 100,
+                            optimal_height_m=best['height_cm'] / 100,
+                            optimal_LD_ratio=best['LD_ratio'],
+                            predicted_H2_percent=best['H2_percent'],
+                            predicted_conversion=best['conversion_percent'],
+                            pressure_drop_kPa=best['pressure_drop_kPa'],
+                            meets_target=best['H2_percent'] >= st.session_state.ind_target_H2,
+                            meets_pressure_constraint=best['pressure_drop_kPa'] <= st.session_state.ind_max_dP,
+                        )
+                        
+                        st.session_state.industrial_results = {
+                            'parametric': parametric,
+                            'optimal': optimal,
+                        }
+                        
+                        st.session_state.auto_insight = generate_auto_insight("industrial", {
+                            'diameter': optimal.optimal_diameter_m * 100,
+                            'height': optimal.optimal_height_m * 100,
+                            'H2': optimal.predicted_H2_percent,
+                            'dP': optimal.pressure_drop_kPa,
+                        })
                     
-                    optimal = ScaleUpResult(
-                        optimal_diameter_m=best['diameter_cm'] / 100,
-                        optimal_height_m=best['height_cm'] / 100,
-                        optimal_LD_ratio=best['LD_ratio'],
-                        predicted_H2_percent=best['H2_percent'],
-                        predicted_conversion=best['conversion_percent'],
-                        pressure_drop_kPa=best['pressure_drop_kPa'],
-                        meets_target=best['H2_percent'] >= st.session_state.ind_target_H2,
-                        meets_pressure_constraint=best['pressure_drop_kPa'] <= st.session_state.ind_max_dP,
-                    )
-                    
-                    st.session_state.industrial_results = {
-                        'parametric': parametric,
-                        'optimal': optimal,
-                    }
-                    
-                    st.session_state.auto_insight = generate_auto_insight("industrial", {
-                        'diameter': optimal.optimal_diameter_m * 100,
-                        'height': optimal.optimal_height_m * 100,
-                        'H2': optimal.predicted_H2_percent,
-                        'dP': optimal.pressure_drop_kPa,
-                    })
-                
                 st.success("✅ Complete!")
                 st.rerun()
         
@@ -917,7 +921,6 @@ with tabs[3]:
                 else:
                     st.warning("⚠️ Some constraints not met")
                 
-                # Parametric plot
                 fig = plot_parametric_study(parametric, opt, 
                                            st.session_state.ind_target_H2,
                                            st.session_state.ind_max_dP)
@@ -965,9 +968,11 @@ with tabs[4]:
 | Height | {st.session_state.lab_bed_height:.2f} cm |
 | Flow | {st.session_state.lab_flow_rate} mL/min |
 | Catalyst | {st.session_state.lab_catalyst_mass} g |
+| Particle | {st.session_state.lab_particle_size} μm |
 | **H₂** | **{lab_results['outlet_H2_percent']:.2f}%** |
 | **CH₄** | **{lab_results['outlet_CH4_percent']:.2f}%** |
 | **Conv** | **{lab_results['outlet_conversion']:.2f}%** |
+| **ΔP** | **{lab_results['pressure_drop_kPa']:.3f} kPa** |
 """)
         
         with col2:
@@ -980,32 +985,35 @@ with tabs[4]:
 | L/D | {opt.optimal_LD_ratio:.2f} |
 | Flow | {st.session_state.ind_flow_rate} LPM |
 | Catalyst | {st.session_state.ind_catalyst_mass} kg |
+| Particle | {st.session_state.ind_particle_size} μm |
 | **H₂** | **{ind_results['outlet_H2_percent']:.2f}%** |
 | **CH₄** | **{ind_results['outlet_CH4_percent']:.2f}%** |
 | **Conv** | **{ind_results['outlet_conversion']:.2f}%** |
+| **ΔP** | **{ind_results['pressure_drop_kPa']:.2f} kPa** |
 """)
         
         with col3:
             st.markdown("### 📊 Scale Factors")
             flow_scale = (st.session_state.ind_flow_rate * 1000) / st.session_state.lab_flow_rate
             cat_scale = (st.session_state.ind_catalyst_mass * 1000) / st.session_state.lab_catalyst_mass
+            particle_scale = st.session_state.ind_particle_size / st.session_state.lab_particle_size
             st.markdown(f"""
 | Factor | Value |
 |--------|-------|
 | Flow | **{flow_scale:.0f}x** |
 | Catalyst | **{cat_scale:.0f}x** |
+| Particle | **{particle_scale:.0f}x** |
 | Diameter | {(opt.optimal_diameter_m*100)/st.session_state.lab_diameter:.1f}x |
 | Height | {(opt.optimal_height_m*100)/st.session_state.lab_bed_height:.1f}x |
 """)
         
-        # Comparison bar chart
         st.markdown("### Performance Comparison")
         
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        
+        x = np.arange(2)
         
         # H2 comparison
-        x = np.arange(2)
-        width = 0.35
         axes[0].bar(x, [lab_results['outlet_H2_percent'], ind_results['outlet_H2_percent']], 
                    color=['steelblue', 'darkorange'])
         axes[0].axhline(y=st.session_state.ind_target_H2, color='green', linestyle='--', label='Target')
@@ -1033,6 +1041,17 @@ with tabs[4]:
         axes[2].set_ylabel('Conversion [%]')
         axes[2].set_title('CH₄ Conversion')
         axes[2].grid(True, alpha=0.3, axis='y')
+        
+        # Pressure drop comparison
+        axes[3].bar(x, [lab_results['pressure_drop_kPa'], ind_results['pressure_drop_kPa']], 
+                   color=['steelblue', 'darkorange'])
+        axes[3].axhline(y=st.session_state.ind_max_dP, color='red', linestyle='--', label='Max ΔP')
+        axes[3].set_xticks(x)
+        axes[3].set_xticklabels(['Lab', 'Industrial'])
+        axes[3].set_ylabel('ΔP [kPa]')
+        axes[3].set_title('Pressure Drop')
+        axes[3].legend()
+        axes[3].grid(True, alpha=0.3, axis='y')
         
         plt.tight_layout()
         st.pyplot(fig)
@@ -1064,7 +1083,21 @@ with tabs[5]:
 | Diameter | {st.session_state.lab_diameter} cm |
 | Height | {st.session_state.lab_bed_height} cm |
 | Catalyst | {st.session_state.lab_catalyst_mass} g |
-| Particle Size | {st.session_state.lab_particle_size} μm |
+| **Particle Size** | **{st.session_state.lab_particle_size} μm** |
+| Particle Density | {st.session_state.lab_particle_density} kg/m³ |
+""")
+        
+        st.markdown("### Industrial Scale")
+        st.markdown(f"""
+| Parameter | Value |
+|-----------|-------|
+| Flow Rate | {st.session_state.ind_flow_rate} LPM |
+| Catalyst | {st.session_state.ind_catalyst_mass} kg |
+| **Particle Size** | **{st.session_state.ind_particle_size} μm ({st.session_state.ind_particle_size/1000:.1f} mm)** |
+| Particle Density | {st.session_state.ind_particle_density} kg/m³ |
+| Target H₂ | {st.session_state.ind_target_H2}% |
+| L/D Range | {st.session_state.ind_LD_min}-{st.session_state.ind_LD_max} |
+| Max ΔP | {st.session_state.ind_max_dP} kPa |
 """)
     
     with col2:
@@ -1086,20 +1119,34 @@ with tabs[5]:
 | Activation Energy | {st.session_state.get('calibrated_Ea_value', 150):.0f} kJ/mol | {status} |
 | Deactivation (kd) | {st.session_state.get('calibrated_kd_value', 0.008):.4f} 1/min | {status} |
 """)
+        
+        st.markdown("### Scale-Up Note")
+        st.info(f"""
+**Particle Size Difference:**
+- Lab: {st.session_state.lab_particle_size} μm (fine powder)
+- Industrial: {st.session_state.ind_particle_size} μm ({st.session_state.ind_particle_size/1000:.1f} mm)
+- Scale factor: {st.session_state.ind_particle_size/st.session_state.lab_particle_size:.0f}x
+
+Industrial reactors use larger particles to maintain reasonable pressure drop at high flow rates. This affects effectiveness factor (η) but is necessary for practical operation.
+""")
     
     # Export
     st.markdown("### 📥 Export")
     settings = {
-        'Parameter': ['Temperature', 'Pressure', 'Lab Flow', 'Lab D', 'Lab L', 
-                     'Industrial Flow', 'Industrial Catalyst', 'A', 'Ea', 'kd'],
+        'Parameter': ['Temperature (°C)', 'Pressure (bar)', 'Lab Flow (mL/min)', 'Lab D (cm)', 'Lab L (cm)', 
+                     'Lab Particle (μm)', 'Industrial Flow (LPM)', 'Industrial Catalyst (kg)', 
+                     'Industrial Particle (μm)', 'A (1/s)', 'Ea (kJ/mol)', 'kd (1/min)'],
         'Value': [st.session_state.temperature, st.session_state.inlet_pressure,
                  st.session_state.lab_flow_rate, st.session_state.lab_diameter,
-                 st.session_state.lab_bed_height, st.session_state.ind_flow_rate,
-                 st.session_state.ind_catalyst_mass, st.session_state.get('calibrated_A_value', 5e4),
-                 st.session_state.get('calibrated_Ea_value', 150), st.session_state.get('calibrated_kd_value', 0.008)]
+                 st.session_state.lab_bed_height, st.session_state.lab_particle_size,
+                 st.session_state.ind_flow_rate, st.session_state.ind_catalyst_mass,
+                 st.session_state.ind_particle_size,
+                 st.session_state.get('calibrated_A_value', 5e4),
+                 st.session_state.get('calibrated_Ea_value', 150), 
+                 st.session_state.get('calibrated_kd_value', 0.008)]
     }
     st.download_button("📥 Download Settings", pd.DataFrame(settings).to_csv(index=False),
-                      "settings.csv", "text/csv", use_container_width=True)
+                      "reactor_settings.csv", "text/csv", use_container_width=True)
 
 # ============================================================================
 # AI ASSISTANT - BOTTOM
@@ -1130,7 +1177,11 @@ with qa3:
 
 **Deactivation:** da/dt = -kd·a
 
-**Carbon:** 1 mol CH₄ → 1 mol C (12 g)"""})
+**Ergun ΔP:** -dP/dz = 150μ(1-ε)²u/(dp²ε³) + 1.75ρ(1-ε)u²/(dpε³)
+
+**Carbon:** 1 mol CH₄ → 1 mol C (12 g)
+
+**Note:** Larger particles (↑dp) reduce ΔP but also reduce η"""})
         st.rerun()
 with qa4:
     if st.button("🗑️ Clear", use_container_width=True):
@@ -1156,4 +1207,4 @@ with col_btn:
             st.rerun()
 
 st.markdown("---")
-st.caption(f"Anukaran AI © 2024 | CH₄ → C + 2H₂ | {st.session_state.temperature}°C | Target: {st.session_state.ind_target_H2}%")
+st.caption(f"Anukaran AI © 2024 | CH₄ → C + 2H₂ | {st.session_state.temperature}°C | Target: {st.session_state.ind_target_H2}% | Lab: {st.session_state.lab_particle_size}μm | Industrial: {st.session_state.ind_particle_size}μm")
