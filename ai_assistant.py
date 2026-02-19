@@ -29,7 +29,7 @@ class GeminiAssistant:
     def generate_response(self, user_message, context_str):
         if not self.model_available: return "AI is not available."
         prompt = (
-            "You are an expert chemical reaction engineering assistant.\n"
+            "You are an expert catalytic reactor engineering assistant for KinetiScale.\n"
             f"Simulation context: {context_str}\n\n"
             f"User request: {user_message}"
         )

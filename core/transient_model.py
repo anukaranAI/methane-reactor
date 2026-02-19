@@ -1,29 +1,26 @@
 """
-Anukaran AI - Transient Reactor Model
-=====================================
+KinetiScale - Generic Transient Reactor Model
+==============================================
 Unsteady-state packed bed reactor with catalyst deactivation.
-Reaction: CH4 → C + 2H2
-
-Configured for LAB SCALE and INDUSTRIAL SCALE reactors.
-Temperature: 800°C
-Target H2: 30%
+Supports any single gas-phase catalytic reaction defined via the
+Reaction dataclass from core.chemistry.
 """
 
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import minimize_scalar, brentq
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Callable
 import warnings
 
-warnings.filterwarnings('ignore')
+from .chemistry import Reaction, R_GAS
+from .transport import (
+    gas_mixture_viscosity,
+    gas_mixture_density,
+    effective_diffusivity,
+    ergun_pressure_drop,
+)
 
-# Physical constants
-R_GAS = 8.314          # J/(mol·K)
-MW_CH4 = 16.04e-3      # kg/mol
-MW_H2 = 2.016e-3       # kg/mol
-MW_C = 12.01e-3        # kg/mol
-MW_N2 = 28.01e-3       # kg/mol
+warnings.filterwarnings('ignore')
 
 
 # ============================================================================
@@ -37,7 +34,7 @@ class DeactivationParams:
     order: int = 1             # Deactivation order (1 or 2)
     E_d: float = 80000.0       # Deactivation activation energy [J/mol]
     T_ref: float = 1073.15     # Reference temperature [K] (800°C)
-    
+
     def get_kd_at_temperature(self, T: float) -> float:
         """Get temperature-dependent deactivation rate constant"""
         return self.k_d * np.exp(-self.E_d / R_GAS * (1/T - 1/self.T_ref))
@@ -45,15 +42,15 @@ class DeactivationParams:
 
 class DeactivationModel:
     """Catalyst deactivation kinetics."""
-    
+
     def __init__(self, model_type: str = 'first_order', params: DeactivationParams = None):
         self.model_type = model_type
         self.params = params or DeactivationParams()
-    
-    def rate(self, activity: float, T: float, C_CH4: float = 0.0) -> float:
+
+    def rate(self, activity: float, T: float, C_reactant: float = 0.0) -> float:
         """Calculate deactivation rate da/dt [1/min]"""
         k_d = self.params.get_kd_at_temperature(T)
-        
+
         if self.model_type == 'linear':
             return -k_d
         elif self.model_type == 'first_order':
@@ -61,35 +58,14 @@ class DeactivationModel:
         elif self.model_type == 'second_order':
             return -k_d * activity ** 2
         elif self.model_type == 'coking':
-            return -k_d * activity * max(C_CH4 * 1000, 0.001)
+            return -k_d * activity * max(C_reactant * 1000, 0.001)
         else:
             return -k_d * activity
 
 
 # ============================================================================
-# TRANSPORT PROPERTIES
+# KINETIC FUNCTIONS
 # ============================================================================
-
-def gas_viscosity(T, y_CH4, y_H2):
-    """Gas mixture viscosity [Pa·s]"""
-    y_N2 = max(0, 1 - y_CH4 - y_H2)
-    mu_CH4 = 1.02e-5 * (T / 300) ** 0.87
-    mu_H2 = 8.76e-6 * (T / 300) ** 0.68
-    mu_N2 = 1.78e-5 * (T / 300) ** 0.67
-    return y_CH4 * mu_CH4 + y_H2 * mu_H2 + y_N2 * mu_N2
-
-
-def gas_density(T, P, y_CH4, y_H2):
-    """Gas mixture density [kg/m³]"""
-    y_N2 = max(0, 1 - y_CH4 - y_H2)
-    MW_mix = y_CH4 * MW_CH4 + y_H2 * MW_H2 + y_N2 * MW_N2
-    return P * MW_mix / (R_GAS * T)
-
-
-def diffusivity_CH4(T, P):
-    """CH4 molecular diffusivity [m²/s]"""
-    return 1.87e-5 * (T / 300) ** 1.75 * (101325 / P)
-
 
 def arrhenius_rate_constant(T, A, Ea, beta=0):
     """Arrhenius rate constant [1/s]"""
@@ -106,26 +82,17 @@ def effectiveness_factor(phi):
         return (3.0 / phi) * (1.0 / np.tanh(phi) - 1.0 / phi)
 
 
-def ergun_pressure_drop(u, rho, mu, d_p, eps):
-    """Ergun equation pressure drop [Pa/m]"""
-    if u <= 0:
-        return 0.0
-    term1 = 150 * mu * (1 - eps)**2 / (d_p**2 * eps**3) * u
-    term2 = 1.75 * rho * (1 - eps) / (d_p * eps**3) * u * abs(u)
-    return term1 + term2
-
-
 # ============================================================================
 # REACTOR CONFIGURATION
 # ============================================================================
 
 @dataclass
 class ReactorConfig:
-    """Unified reactor configuration for both scales"""
+    """Unified reactor configuration for any single catalytic reaction."""
     # Geometry
     diameter_m: float
     bed_height_m: float
-    
+
     # Catalyst
     particle_diameter_m: float
     particle_density: float      # kg/m³
@@ -133,63 +100,55 @@ class ReactorConfig:
     tortuosity: float
     bed_porosity: float
     catalyst_mass_kg: float
-    
+
     # Operating conditions
     temperature_K: float
     inlet_pressure_Pa: float
     flow_rate_m3_s: float
-    
-    # Inlet composition (pure CH4)
-    y_CH4_in: float = 1.0
-    y_H2_in: float = 0.0
-    
+
+    # Reaction definition
+    reaction: Reaction = None
+
+    # Inlet composition: {species_name: mole_fraction}
+    # Species not listed are assumed to be 0. Inert fills remainder to 1.0.
+    inlet_mole_fractions: Dict[str, float] = field(default_factory=dict)
+
     # Kinetics (to be calibrated)
-    pre_exponential: float = 5.0e4      # 1/s - calibrated for lab data
-    activation_energy: float = 150000.0  # J/mol - calibrated
+    pre_exponential: float = 5.0e4      # 1/s
+    activation_energy: float = 150000.0  # J/mol
     beta: float = 0.0
-    
+
     @property
     def cross_section_area(self) -> float:
         return np.pi * (self.diameter_m / 2) ** 2
-    
-    @classmethod
-    def from_lab_config(cls, lab_config, A: float = 5.0e4, Ea: float = 150000.0):
-        """Create ReactorConfig from LabScaleConfig"""
-        return cls(
-            diameter_m=lab_config.reactor_diameter_cm / 100,
-            bed_height_m=lab_config.bed_height_cm / 100,
-            particle_diameter_m=lab_config.particle_size_um * 1e-6,
-            particle_density=lab_config.particle_density_kg_m3,
-            particle_porosity=lab_config.particle_porosity,
-            tortuosity=lab_config.tortuosity,
-            bed_porosity=lab_config.bed_porosity,
-            catalyst_mass_kg=lab_config.catalyst_mass_g / 1000,
-            temperature_K=lab_config.temperature_C + 273.15,
-            inlet_pressure_Pa=lab_config.inlet_pressure_bar * 1e5,
-            flow_rate_m3_s=lab_config.flow_rate_mL_min / 60 / 1e6,
-            pre_exponential=A,
-            activation_energy=Ea,
-        )
-    
-    @classmethod
-    def from_industrial_config(cls, ind_config, diameter_m: float, height_m: float,
-                                A: float = 5.0e4, Ea: float = 150000.0):
-        """Create ReactorConfig from IndustrialScaleConfig with given geometry"""
-        return cls(
-            diameter_m=diameter_m,
-            bed_height_m=height_m,
-            particle_diameter_m=ind_config.particle_size_um * 1e-6,
-            particle_density=ind_config.particle_density_kg_m3,
-            particle_porosity=ind_config.particle_porosity,
-            tortuosity=ind_config.tortuosity,
-            bed_porosity=ind_config.bed_porosity,
-            catalyst_mass_kg=ind_config.catalyst_mass_kg,
-            temperature_K=ind_config.temperature_C + 273.15,
-            inlet_pressure_Pa=ind_config.inlet_pressure_bar * 1e5,
-            flow_rate_m3_s=ind_config.flow_rate_LPM / 60 / 1000,  # LPM to m³/s
-            pre_exponential=A,
-            activation_energy=Ea,
-        )
+
+    def get_inlet_y_array(self) -> np.ndarray:
+        """
+        Build ordered mole fraction array for all gas species.
+        Inert species fills the remainder to sum to 1.0.
+        """
+        gas_sp = self.reaction.gas_species
+        y = np.zeros(len(gas_sp))
+        assigned_sum = 0.0
+        inert_idx = None
+
+        for i, sp_name in enumerate(gas_sp):
+            if sp_name in self.inlet_mole_fractions:
+                y[i] = self.inlet_mole_fractions[sp_name]
+                assigned_sum += y[i]
+            elif sp_name == self.reaction.inert:
+                inert_idx = i
+
+        # Fill inert with remainder
+        if inert_idx is not None and assigned_sum < 1.0:
+            y[inert_idx] = max(0.0, 1.0 - assigned_sum)
+
+        # Normalize if needed
+        y_sum = y.sum()
+        if y_sum > 0:
+            y = y / y_sum
+
+        return y
 
 
 # ============================================================================
@@ -198,131 +157,148 @@ class ReactorConfig:
 
 class SteadyStateReactor:
     """
-    Steady-state packed bed reactor solver.
-    Used for both fresh catalyst and with activity factor.
+    Generic steady-state packed bed reactor solver.
+    Supports any single reaction defined by a Reaction object.
     """
-    
+
     def __init__(self, config: ReactorConfig):
         self.cfg = config
-        
-        # Calculate inlet molar flow
+        rxn = config.reaction
+        self.rxn = rxn
+        self.gas_sp = rxn.gas_species
+        self.n_gas = rxn.n_gas
+        self.stoich = rxn.gas_stoich_vector
+        self.key_idx = rxn.gas_species_index(rxn.key_reactant)
+        self.species_objects = [rxn.species[s] for s in self.gas_sp]
+        self.key_species = rxn.species[rxn.key_reactant]
+
+        # Calculate inlet molar flows
         C_total_in = config.inlet_pressure_Pa / (R_GAS * config.temperature_K)  # mol/m³
         Q_in = config.flow_rate_m3_s  # m³/s
         self.F_total_in = Q_in * C_total_in / 1000  # kmol/s
-        self.F_CH4_in = config.y_CH4_in * self.F_total_in
-        self.F_H2_in = config.y_H2_in * self.F_total_in
-    
+
+        y_in = config.get_inlet_y_array()
+        self.F_in = y_in * self.F_total_in  # kmol/s per species
+
     def solve(self, activity: float = 1.0, n_points: int = 100) -> Dict:
         """Solve steady-state reactor with given catalyst activity"""
         cfg = self.cfg
-        
+        n_gas = self.n_gas
+        stoich = self.stoich
+        key_idx = self.key_idx
+        species_objects = self.species_objects
+        key_species = self.key_species
+
         def ode_system(z, y):
-            F_CH4, F_H2, P = y
-            
-            # Stability
-            F_CH4 = max(F_CH4, 1e-30)
-            F_H2 = max(F_H2, 0.0)
-            P = max(P, 1000.0)
-            
-            # Total molar flow (CH4 + H2, assuming no inerts for pure CH4 feed)
-            # For pure CH4: F_total = F_CH4 + F_H2 (carbon deposits, doesn't flow)
-            F_total = F_CH4 + F_H2
-            if F_total < 1e-30:
-                F_total = 1e-30
-            
-            y_CH4 = F_CH4 / F_total
-            y_H2 = F_H2 / F_total
-            
-            # Properties
+            F = np.maximum(y[:n_gas], 0.0)       # molar flows [kmol/s]
+            P = max(y[n_gas], 1000.0)             # pressure [Pa]
+
+            F_total = max(np.sum(F), 1e-30)
+            y_frac = F / F_total                  # mole fractions
+
             T = cfg.temperature_K
-            rho = gas_density(T, P, y_CH4, y_H2)
-            mu = gas_viscosity(T, y_CH4, y_H2)
-            
+            rho = gas_mixture_density(T, P, y_frac, species_objects)
+            mu = gas_mixture_viscosity(T, y_frac, species_objects)
+
             # Volumetric flow and velocity
             Q = F_total * 1000 * R_GAS * T / P  # m³/s
-            u = Q / cfg.cross_section_area  # m/s
-            
-            # Concentration
-            C_CH4 = F_CH4 * 1000 / Q if Q > 0 else 0  # mol/m³
-            
+            u = Q / cfg.cross_section_area        # m/s
+
+            # Key reactant concentration
+            C_key = F[key_idx] * 1000 / Q if Q > 0 else 0  # mol/m³
+
             # Effective diffusivity
-            D_mol = diffusivity_CH4(T, P)
-            D_eff = D_mol * cfg.particle_porosity / cfg.tortuosity
-            
+            D_eff = effective_diffusivity(
+                T, P, key_species,
+                cfg.particle_porosity, cfg.tortuosity
+            )
+
             # Rate constant with activity
             k = arrhenius_rate_constant(T, cfg.pre_exponential, cfg.activation_energy, cfg.beta)
             k_eff = k * activity
-            
+
             # Thiele modulus and effectiveness factor
             if D_eff > 0 and k_eff > 0:
                 phi = (cfg.particle_diameter_m / 6) * np.sqrt(k_eff / D_eff)
             else:
                 phi = 0
             eta = effectiveness_factor(phi)
-            
-            # Reaction rate [mol/(m³_bed·s)]
-            r_bed = k_eff * eta * C_CH4 * (1 - cfg.bed_porosity)
-            
-            # Molar balances [kmol/(m·s)] -> multiply by area for kmol/s per meter
+
+            # Reaction rate [mol/(m³_bed·s)] — first order in key reactant
+            r_bed = k_eff * eta * C_key * (1 - cfg.bed_porosity)
+
+            # Generic species balances [kmol/(m·s)]
             A = cfg.cross_section_area
-            dF_CH4_dz = -r_bed * A / 1000  # kmol/s per m
-            dF_H2_dz = +2.0 * r_bed * A / 1000
-            
+            dF_dz = stoich * r_bed * A / 1000
+
             # Pressure drop
             dP_dz = -ergun_pressure_drop(u, rho, mu, cfg.particle_diameter_m, cfg.bed_porosity)
-            
-            return [dF_CH4_dz, dF_H2_dz, dP_dz]
-        
-        # Initial conditions
-        y0 = [self.F_CH4_in, self.F_H2_in, cfg.inlet_pressure_Pa]
-        
+
+            return np.concatenate([dF_dz, [dP_dz]])
+
+        # Initial conditions: [F_1, F_2, ..., F_n, P]
+        y0 = np.concatenate([self.F_in, [cfg.inlet_pressure_Pa]])
+
         # Solve
         z_span = (0, cfg.bed_height_m)
         z_eval = np.linspace(0, cfg.bed_height_m, n_points)
-        
+
         solution = solve_ivp(
             ode_system, z_span, y0,
             method='RK45', t_eval=z_eval,
             rtol=1e-8, atol=1e-12
         )
-        
+
         # Extract results
         z = solution.t
-        F_CH4 = np.maximum(solution.y[0], 0)
-        F_H2 = np.maximum(solution.y[1], 0)
-        P = solution.y[2]
-        
-        # Calculate outputs
-        F_total = F_CH4 + F_H2
+        F_values = {}
+        y_values = {}
+        for i, sp_name in enumerate(self.gas_sp):
+            F_values[sp_name] = np.maximum(solution.y[i], 0)
+        P = solution.y[n_gas]
+
+        # Total flow and mole fractions
+        F_total = sum(F_values.values())
         F_total = np.maximum(F_total, 1e-30)
-        
-        y_CH4 = F_CH4 / F_total
-        y_H2 = F_H2 / F_total
-        
-        # Conversion
-        X_CH4 = np.clip((self.F_CH4_in - F_CH4) / self.F_CH4_in, 0, 1)
-        
+
+        for sp_name in self.gas_sp:
+            y_values[sp_name] = F_values[sp_name] / F_total
+
+        # Key reactant conversion
+        key_name = self.rxn.key_reactant
+        prod_name = self.rxn.key_product
+        X_key = np.clip((self.F_in[self.key_idx] - F_values[key_name]) / self.F_in[self.key_idx], 0, 1)
+
         # Pressure drop
         delta_P = cfg.inlet_pressure_Pa - P[-1]
-        
-        return {
+
+        # Build results dict with generic keys
+        results = {
             'z': z,
             'z_cm': z * 100,
-            'F_CH4': F_CH4,
-            'F_H2': F_H2,
             'P': P,
-            'y_CH4': y_CH4,
-            'y_H2': y_H2,
-            'X_CH4': X_CH4,
-            'H2_percent': y_H2 * 100,
-            'CH4_percent': y_CH4 * 100,
-            'conversion_percent': X_CH4 * 100,
+            'conversion_percent': X_key * 100,
             'pressure_drop_Pa': delta_P,
             'pressure_drop_kPa': delta_P / 1000,
-            'outlet_H2_percent': y_H2[-1] * 100,
-            'outlet_CH4_percent': y_CH4[-1] * 100,
-            'outlet_conversion': X_CH4[-1] * 100,
+            # Outlet summary
+            'outlet_conversion': X_key[-1] * 100,
+            f'outlet_{prod_name}_percent': y_values[prod_name][-1] * 100,
+            f'outlet_{key_name}_percent': y_values[key_name][-1] * 100,
         }
+
+        # Per-species profiles
+        for sp_name in self.gas_sp:
+            results[f'F_{sp_name}'] = F_values[sp_name]
+            results[f'y_{sp_name}'] = y_values[sp_name]
+            results[f'{sp_name}_percent'] = y_values[sp_name] * 100
+
+        # Convenience aliases for product/reactant
+        results['product_percent'] = y_values[prod_name] * 100
+        results['reactant_percent'] = y_values[key_name] * 100
+        results['outlet_product_percent'] = y_values[prod_name][-1] * 100
+        results['outlet_reactant_percent'] = y_values[key_name][-1] * 100
+
+        return results
 
 
 # ============================================================================
@@ -331,123 +307,186 @@ class SteadyStateReactor:
 
 class TransientReactor:
     """Transient reactor with catalyst deactivation"""
-    
+
     def __init__(self, config: ReactorConfig, deactivation: DeactivationModel = None):
         self.cfg = config
         self.deactivation = deactivation or DeactivationModel('first_order')
         self.steady_solver = SteadyStateReactor(config)
-    
+
     def solve(self, t_final_min: float = 210.0, dt_min: float = 1.0,
               callback: Callable = None) -> Dict:
         """Solve transient reactor over time"""
-        
+
         n_steps = int(t_final_min / dt_min) + 1
         time_min = np.linspace(0, t_final_min, n_steps)
-        
+
+        rxn = self.cfg.reaction
+        prod_name = rxn.key_product
+        react_name = rxn.key_reactant
+
         # Storage
         activity = np.zeros(n_steps)
-        H2_percent = np.zeros(n_steps)
-        CH4_percent = np.zeros(n_steps)
+        product_percent = np.zeros(n_steps)
+        reactant_percent = np.zeros(n_steps)
         conversion = np.zeros(n_steps)
-        
+
         current_activity = 1.0
-        
+
         for i, t in enumerate(time_min):
             activity[i] = current_activity
-            
+
             # Solve steady-state at current activity
             results = self.steady_solver.solve(activity=current_activity)
-            
-            H2_percent[i] = results['outlet_H2_percent']
-            CH4_percent[i] = results['outlet_CH4_percent']
+
+            product_percent[i] = results['outlet_product_percent']
+            reactant_percent[i] = results['outlet_reactant_percent']
             conversion[i] = results['outlet_conversion']
-            
+
             if callback:
                 callback(t, current_activity, results)
-            
+
             # Update activity
             if i < n_steps - 1:
                 da_dt = self.deactivation.rate(
                     current_activity,
                     self.cfg.temperature_K,
-                    0.0  # Simplified
+                    0.0
                 )
                 current_activity = max(0.0, current_activity + da_dt * dt_min)
-        
+
         return {
             'time_min': time_min,
             'activity': activity,
-            'H2_percent': H2_percent,
-            'CH4_percent': CH4_percent,
+            'product_percent': product_percent,
+            'reactant_percent': reactant_percent,
             'conversion': conversion,
             'temperature_C': self.cfg.temperature_K - 273.15,
+            # Named keys for backward compat and clarity
+            f'{prod_name}_percent': product_percent,
+            f'{react_name}_percent': reactant_percent,
         }
+
+
+# ============================================================================
+# SOLID DEPOSITION CALCULATION
+# ============================================================================
+
+def calculate_solid_deposition(conversion: float, flow_rate_mol_s: float,
+                                catalyst_mass_kg: float, reaction: Reaction) -> Dict:
+    """
+    Calculate solid product deposition rate for reactions that produce solids.
+
+    Returns dict of {solid_species_name: rate_g_per_h_per_kg_cat}
+    """
+    rates = {}
+    key_stoich = abs(reaction.stoichiometry[reaction.key_reactant])
+    mol_reacted = conversion * flow_rate_mol_s
+
+    for solid_name in reaction.solid_species:
+        solid_sp = reaction.species[solid_name]
+        solid_stoich = reaction.stoichiometry.get(solid_name, 0)
+        mol_solid = mol_reacted * abs(solid_stoich) / key_stoich
+        # g/h per kg catalyst
+        rate = mol_solid * solid_sp.MW * 1000 * 3600 / catalyst_mass_kg if catalyst_mass_kg > 0 else 0
+        rates[solid_name] = rate
+
+    return rates
 
 
 # ============================================================================
 # KINETIC PARAMETER CALIBRATION
 # ============================================================================
 
-def calibrate_kinetics(lab_config, experimental_H2_at_t0: float,
+def calibrate_kinetics(config: ReactorConfig,
+                       experimental_product_at_t0: float,
                        A_range: Tuple[float, float] = (1e3, 1e8),
                        Ea_range: Tuple[float, float] = (100000, 250000)) -> Dict:
     """
-    Calibrate kinetic parameters (A, Ea) to match experimental H2% at TOS=0.
-    
-    For 800°C, experimental H2% at TOS=0 is 24.13%
+    Calibrate kinetic parameters (A, Ea) to match experimental product% at TOS=0.
     """
     from scipy.optimize import minimize
-    
+
     best_result = {'A': 1e5, 'Ea': 150000, 'error': float('inf')}
-    
-    # Grid search for initial guess
+
     A_values = np.logspace(np.log10(A_range[0]), np.log10(A_range[1]), 20)
     Ea_values = np.linspace(Ea_range[0], Ea_range[1], 20)
-    
+
     for A in A_values:
         for Ea in Ea_values:
             try:
-                config = ReactorConfig.from_lab_config(lab_config, A=A, Ea=Ea)
-                reactor = SteadyStateReactor(config)
+                cfg_copy = ReactorConfig(
+                    diameter_m=config.diameter_m,
+                    bed_height_m=config.bed_height_m,
+                    particle_diameter_m=config.particle_diameter_m,
+                    particle_density=config.particle_density,
+                    particle_porosity=config.particle_porosity,
+                    tortuosity=config.tortuosity,
+                    bed_porosity=config.bed_porosity,
+                    catalyst_mass_kg=config.catalyst_mass_kg,
+                    temperature_K=config.temperature_K,
+                    inlet_pressure_Pa=config.inlet_pressure_Pa,
+                    flow_rate_m3_s=config.flow_rate_m3_s,
+                    reaction=config.reaction,
+                    inlet_mole_fractions=config.inlet_mole_fractions,
+                    pre_exponential=A,
+                    activation_energy=Ea,
+                )
+                reactor = SteadyStateReactor(cfg_copy)
                 results = reactor.solve(activity=1.0)
-                
-                model_H2 = results['outlet_H2_percent']
-                error = abs(model_H2 - experimental_H2_at_t0)
-                
+
+                model_product = results['outlet_product_percent']
+                error = abs(model_product - experimental_product_at_t0)
+
                 if error < best_result['error']:
-                    best_result = {'A': A, 'Ea': Ea, 'error': error, 'H2_predicted': model_H2}
-            except:
+                    best_result = {'A': A, 'Ea': Ea, 'error': error, 'product_predicted': model_product}
+            except Exception:
                 continue
-    
+
     return best_result
 
 
-def fit_deactivation(lab_config, A: float, Ea: float,
+def fit_deactivation(config: ReactorConfig, A: float, Ea: float,
                      experimental_times: np.ndarray,
-                     experimental_H2: np.ndarray,
+                     experimental_product: np.ndarray,
                      kd_range: Tuple[float, float] = (0.001, 0.1)) -> Dict:
     """Fit deactivation parameter to experimental time series"""
-    
+
     best_kd = 0.01
     best_rmse = float('inf')
-    
+
     kd_values = np.linspace(kd_range[0], kd_range[1], 50)
-    
+
     for kd in kd_values:
         try:
-            config = ReactorConfig.from_lab_config(lab_config, A=A, Ea=Ea)
+            cfg_copy = ReactorConfig(
+                diameter_m=config.diameter_m,
+                bed_height_m=config.bed_height_m,
+                particle_diameter_m=config.particle_diameter_m,
+                particle_density=config.particle_density,
+                particle_porosity=config.particle_porosity,
+                tortuosity=config.tortuosity,
+                bed_porosity=config.bed_porosity,
+                catalyst_mass_kg=config.catalyst_mass_kg,
+                temperature_K=config.temperature_K,
+                inlet_pressure_Pa=config.inlet_pressure_Pa,
+                flow_rate_m3_s=config.flow_rate_m3_s,
+                reaction=config.reaction,
+                inlet_mole_fractions=config.inlet_mole_fractions,
+                pre_exponential=A,
+                activation_energy=Ea,
+            )
             deact = DeactivationModel('first_order', DeactivationParams(k_d=kd))
-            reactor = TransientReactor(config, deact)
-            
+            reactor = TransientReactor(cfg_copy, deact)
+
             results = reactor.solve(t_final_min=experimental_times[-1], dt_min=1.0)
-            
-            model_H2 = np.interp(experimental_times, results['time_min'], results['H2_percent'])
-            rmse = np.sqrt(np.mean((model_H2 - experimental_H2) ** 2))
-            
+
+            model_product = np.interp(experimental_times, results['time_min'], results['product_percent'])
+            rmse = np.sqrt(np.mean((model_product - experimental_product) ** 2))
+
             if rmse < best_rmse:
                 best_rmse = rmse
                 best_kd = kd
-        except:
+        except Exception:
             continue
-    
+
     return {'k_d': best_kd, 'rmse': best_rmse}
