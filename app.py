@@ -1317,6 +1317,8 @@ with tabs[4]:
                         progress_bar2.progress(1.0, text="Complete!")
 
                         st.session_state.ind_opt_result = result
+                        st.session_state.ind_opt_base_cfg = base_cfg
+                        st.session_state.ind_opt_bounds = ind_bounds
                         st.rerun()
 
                 if 'ind_opt_result' in st.session_state and st.session_state.ind_opt_result is not None:
@@ -1355,29 +1357,32 @@ with tabs[4]:
                     plt.close(fig_conv2)
 
                     # Sensitivity analysis
-                    with st.expander("Sensitivity Analysis"):
-                        st.caption("Running one-at-a-time sensitivity sweep...")
-                        analyzer = SensitivityAnalyzer(
-                            result.variable_names,
-                            [ind_bounds[v] for v in result.variable_names]
-                        )
+                    saved_cfg = st.session_state.get('ind_opt_base_cfg')
+                    saved_bounds = st.session_state.get('ind_opt_bounds')
+                    if saved_cfg and saved_bounds:
+                        with st.expander("Sensitivity Analysis"):
+                            st.caption("Running one-at-a-time sensitivity sweep...")
+                            analyzer = SensitivityAnalyzer(
+                                result.variable_names,
+                                [saved_bounds[v] for v in result.variable_names]
+                            )
 
-                        best_obj_key = st.session_state.get('ind_opt_objective', 'product_percent')
-                        sens_obj_fn = create_industrial_objective(
-                            rxn, base_cfg, result.variable_names, best_obj_key)
-                        importance = analyzer.analyze(sens_obj_fn, n_samples=15)
+                            best_obj_key = st.session_state.get('ind_opt_objective', 'product_percent')
+                            sens_obj_fn = create_industrial_objective(
+                                rxn, saved_cfg, result.variable_names, best_obj_key)
+                            importance = analyzer.analyze(sens_obj_fn, n_samples=15)
 
-                        fig_sens, ax_sens = plt.subplots(1, 1, figsize=(10, 4))
-                        names = [OPTIMIZATION_VARIABLES.get(n, {'display': n})['display'] for n in importance.keys()]
-                        scores = list(importance.values())
-                        colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(scores)))
-                        ax_sens.barh(names, scores, color=colors)
-                        ax_sens.set_xlabel('Relative Importance')
-                        ax_sens.set_title('Parameter Sensitivity')
-                        ax_sens.grid(True, alpha=0.3, axis='x')
-                        plt.tight_layout()
-                        st.pyplot(fig_sens)
-                        plt.close(fig_sens)
+                            fig_sens, ax_sens = plt.subplots(1, 1, figsize=(10, 4))
+                            names = [OPTIMIZATION_VARIABLES.get(n, {'display': n})['display'] for n in importance.keys()]
+                            scores = list(importance.values())
+                            colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(scores)))
+                            ax_sens.barh(names, scores, color=colors)
+                            ax_sens.set_xlabel('Relative Importance')
+                            ax_sens.set_title('Parameter Sensitivity')
+                            ax_sens.grid(True, alpha=0.3, axis='x')
+                            plt.tight_layout()
+                            st.pyplot(fig_sens)
+                            plt.close(fig_sens)
 
                     with st.expander("All Trials"):
                         trial_data = []
