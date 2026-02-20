@@ -67,6 +67,18 @@ from .scaleup import (
     get_assumptions_text,
 )
 
+# Optimizer
+from .optimizer import (
+    BayesianOptimizer,
+    OptimizationConfig,
+    OptimizationResult,
+    SensitivityAnalyzer,
+    OPTIMIZATION_VARIABLES,
+    OPTIMIZATION_OBJECTIVES,
+    create_lab_objective,
+    create_industrial_objective,
+)
+
 __all__ = [
     # Chemistry
     'Species', 'Reaction', 'ReactionTemplate', 'R_GAS',
@@ -87,4 +99,8 @@ __all__ = [
     'get_experimental_data_from_template', 'get_available_temperatures_from_template',
     # Scale-up
     'ScaleUpResult', 'IndustrialScaleUp', 'get_assumptions_text',
+    # Optimizer
+    'BayesianOptimizer', 'OptimizationConfig', 'OptimizationResult',
+    'SensitivityAnalyzer', 'OPTIMIZATION_VARIABLES', 'OPTIMIZATION_OBJECTIVES',
+    'create_lab_objective', 'create_industrial_objective',
 ]

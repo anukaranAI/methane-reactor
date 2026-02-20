@@ -27,6 +27,11 @@ from core.transient_model import (
 from core.scaleup import (
     IndustrialScaleUp, ScaleUpResult, get_assumptions_text,
 )
+from core.optimizer import (
+    BayesianOptimizer, OptimizationConfig, OptimizationResult,
+    SensitivityAnalyzer, OPTIMIZATION_VARIABLES, OPTIMIZATION_OBJECTIVES,
+    create_lab_objective, create_industrial_objective,
+)
 
 # ============================================================================
 # PAGE CONFIG
@@ -104,6 +109,8 @@ other_defaults = {
     'calibrated_A_value': current_template.default_A,
     'calibrated_Ea_value': current_template.default_Ea / 1000,
     'calibrated_kd_value': current_template.default_kd,
+    'lab_opt_result': None,
+    'ind_opt_result': None,
 }
 
 for key, value in other_defaults.items():
@@ -521,6 +528,8 @@ with st.sidebar:
         st.session_state.calibrated_A_value = new_tmpl.default_A
         st.session_state.calibrated_Ea_value = new_tmpl.default_Ea / 1000
         st.session_state.calibrated_kd_value = new_tmpl.default_kd
+        st.session_state.lab_opt_result = None
+        st.session_state.ind_opt_result = None
         st.session_state.defaults_initialized = True
         st.rerun()
 
@@ -613,6 +622,7 @@ tabs = st.tabs([
     "Lab Calibration",
     "Transient Analysis",
     "Industrial Scale-Up",
+    "Bayesian Optimization",
     "Comparison",
     "Settings"
 ])
@@ -1052,9 +1062,339 @@ with tabs[3]:
 
 
 # ============================================================================
-# TAB 5: COMPARISON
+# TAB 5: BAYESIAN OPTIMIZATION
 # ============================================================================
 with tabs[4]:
+    st.header(f"Bayesian Optimization \u2014 {rxn.display_name}")
+
+    if not st.session_state.calibration_done:
+        st.warning("Calibrate kinetics in **Lab Calibration** tab first!")
+    else:
+        opt_subtab1, opt_subtab2 = st.tabs(["Lab Optimization", "Industrial Optimization"])
+
+        # ---- LAB OPTIMIZATION ----
+        with opt_subtab1:
+            st.markdown("### Optimize Lab-Scale Parameters")
+            st.caption("Use Bayesian optimization (Gaussian Process + Expected Improvement) to find optimal operating conditions.")
+
+            col_cfg, col_res = st.columns([1, 2])
+
+            with col_cfg:
+                lab_opt_vars = {
+                    'temperature_C': 'Temperature (C)',
+                    'flow_rate_mL_min': 'Flow Rate (mL/min)',
+                    'particle_size_um': 'Particle Size (um)',
+                    'bed_height_cm': 'Bed Height (cm)',
+                    'catalyst_mass_g': 'Catalyst Mass (g)',
+                    'bed_porosity': 'Bed Porosity',
+                }
+
+                selected_lab_vars = st.multiselect(
+                    "Variables to Optimize",
+                    list(lab_opt_vars.keys()),
+                    default=['temperature_C', 'flow_rate_mL_min'],
+                    format_func=lambda k: lab_opt_vars[k],
+                    key="lab_opt_vars"
+                )
+
+                lab_objective = st.selectbox(
+                    "Objective",
+                    ['product_percent', 'conversion_percent', 'min_pressure_drop', 'product_per_dP'],
+                    format_func=lambda k: OPTIMIZATION_OBJECTIVES[k],
+                    key="lab_opt_objective"
+                )
+
+                lab_n_iter = st.slider("Iterations", 10, 50, 25, key="lab_opt_iter")
+
+                # Bounds
+                lab_bounds = {}
+                if selected_lab_vars:
+                    st.markdown("#### Bounds")
+                    for var in selected_lab_vars:
+                        info = OPTIMIZATION_VARIABLES[var]
+                        default_lo, default_hi = info['default_bounds']
+                        c1, c2 = st.columns(2)
+                        lo = c1.number_input(f"{info['display']} min", value=float(default_lo), key=f"lab_lo_{var}")
+                        hi = c2.number_input(f"{info['display']} max", value=float(default_hi), key=f"lab_hi_{var}")
+                        lab_bounds[var] = (lo, hi)
+
+                run_lab_opt = st.button("Run Lab Optimization", type="primary",
+                                        use_container_width=True, key="run_lab_opt",
+                                        disabled=len(selected_lab_vars) < 1)
+
+            with col_res:
+                if run_lab_opt and selected_lab_vars:
+                    base_cfg = {
+                        'diameter_m': st.session_state.lab_diameter / 100,
+                        'bed_height_m': st.session_state.lab_bed_height / 100,
+                        'particle_diameter_m': st.session_state.lab_particle_size * 1e-6,
+                        'particle_density': st.session_state.lab_particle_density,
+                        'particle_porosity': st.session_state.particle_porosity,
+                        'tortuosity': st.session_state.tortuosity,
+                        'bed_porosity': st.session_state.bed_porosity,
+                        'catalyst_mass_kg': st.session_state.lab_catalyst_mass / 1000,
+                        'temperature_K': st.session_state.temperature + 273.15,
+                        'inlet_pressure_Pa': st.session_state.inlet_pressure * 1e5,
+                        'flow_rate_m3_s': st.session_state.lab_flow_rate / 60 / 1e6,
+                        'inlet_mole_fractions': get_inlet_composition(),
+                        'pre_exponential': st.session_state.calibrated_A_value,
+                        'activation_energy': st.session_state.calibrated_Ea_value * 1000,
+                    }
+
+                    obj_fn = create_lab_objective(rxn, base_cfg, selected_lab_vars, lab_objective)
+
+                    config = OptimizationConfig(
+                        variable_names=selected_lab_vars,
+                        bounds=[lab_bounds[v] for v in selected_lab_vars],
+                        n_iterations=lab_n_iter,
+                        n_initial_points=min(5, lab_n_iter // 3),
+                        maximize=(lab_objective != 'min_pressure_drop'),
+                    )
+
+                    valid, msg = config.validate()
+                    if not valid:
+                        st.error(msg)
+                    else:
+                        progress_bar = st.progress(0, text="Optimizing...")
+                        status_text = st.empty()
+
+                        def lab_callback(iteration, params, value):
+                            progress_bar.progress(iteration / lab_n_iter,
+                                text=f"Iteration {iteration}/{lab_n_iter}")
+
+                        optimizer = BayesianOptimizer(config)
+                        result = optimizer.optimize(obj_fn, callback=lab_callback)
+                        progress_bar.progress(1.0, text="Complete!")
+
+                        st.session_state.lab_opt_result = result
+                        st.rerun()
+
+                if 'lab_opt_result' in st.session_state and st.session_state.lab_opt_result is not None:
+                    result = st.session_state.lab_opt_result
+
+                    st.markdown("### Optimization Results")
+                    st.success(result.message)
+
+                    # Best parameters
+                    st.markdown("#### Best Parameters")
+                    best_cols = st.columns(min(len(result.best_params), 4))
+                    for i, (name, val) in enumerate(result.best_params.items()):
+                        info = OPTIMIZATION_VARIABLES.get(name, {'display': name, 'unit': ''})
+                        best_cols[i % len(best_cols)].metric(info['display'], f"{val:.3g}")
+
+                    obj_label = OPTIMIZATION_OBJECTIVES.get(
+                        st.session_state.get('lab_opt_objective', 'product_percent'), 'Objective')
+                    best_val = result.best_value
+                    if st.session_state.get('lab_opt_objective') == 'min_pressure_drop':
+                        best_val = -best_val
+                    st.metric("Best Objective Value", f"{best_val:.4f}")
+
+                    # Convergence plot
+                    st.markdown("#### Convergence")
+                    fig_conv, ax_conv = plt.subplots(1, 1, figsize=(10, 4))
+                    ax_conv.plot(range(1, len(result.best_so_far)+1), result.best_so_far,
+                                 'b-o', markersize=4, linewidth=2, label='Best so far')
+                    ax_conv.plot(range(1, len(result.convergence)+1), result.convergence,
+                                 'r.', alpha=0.4, markersize=6, label='Each trial')
+                    ax_conv.set_xlabel('Iteration')
+                    ax_conv.set_ylabel('Objective Value')
+                    ax_conv.set_title('Bayesian Optimization Convergence')
+                    ax_conv.legend()
+                    ax_conv.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig_conv)
+                    plt.close(fig_conv)
+
+                    # Trial history table
+                    with st.expander("All Trials"):
+                        trial_data = []
+                        for i, trial in enumerate(result.all_trials):
+                            row = {'Trial': i+1}
+                            row.update(trial['params'])
+                            row['Objective'] = trial['value']
+                            trial_data.append(row)
+                        st.dataframe(pd.DataFrame(trial_data), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Select variables, set bounds, and click **Run Lab Optimization**.")
+
+        # ---- INDUSTRIAL OPTIMIZATION ----
+        with opt_subtab2:
+            st.markdown("### Optimize Industrial-Scale Parameters")
+            st.caption("Find optimal industrial reactor configuration using Bayesian optimization.")
+
+            col_cfg2, col_res2 = st.columns([1, 2])
+
+            with col_cfg2:
+                ind_opt_vars = {
+                    'temperature_C': 'Temperature (C)',
+                    'LD_ratio': 'L/D Ratio',
+                    'ind_flow_rate_LPM': 'Flow Rate (LPM)',
+                    'ind_particle_size_um': 'Particle Size (um)',
+                    'ind_catalyst_mass_kg': 'Catalyst Mass (kg)',
+                    'bed_porosity': 'Bed Porosity',
+                }
+
+                selected_ind_vars = st.multiselect(
+                    "Variables to Optimize",
+                    list(ind_opt_vars.keys()),
+                    default=['LD_ratio', 'ind_particle_size_um'],
+                    format_func=lambda k: ind_opt_vars[k],
+                    key="ind_opt_vars"
+                )
+
+                ind_objective = st.selectbox(
+                    "Objective",
+                    ['product_percent', 'conversion_percent', 'min_pressure_drop', 'product_per_dP'],
+                    format_func=lambda k: OPTIMIZATION_OBJECTIVES[k],
+                    index=3,
+                    key="ind_opt_objective"
+                )
+
+                ind_n_iter = st.slider("Iterations", 10, 50, 25, key="ind_opt_iter")
+
+                ind_bounds = {}
+                if selected_ind_vars:
+                    st.markdown("#### Bounds")
+                    for var in selected_ind_vars:
+                        info = OPTIMIZATION_VARIABLES[var]
+                        default_lo, default_hi = info['default_bounds']
+                        c1, c2 = st.columns(2)
+                        lo = c1.number_input(f"{info['display']} min", value=float(default_lo), key=f"ind_lo_{var}")
+                        hi = c2.number_input(f"{info['display']} max", value=float(default_hi), key=f"ind_hi_{var}")
+                        ind_bounds[var] = (lo, hi)
+
+                run_ind_opt = st.button("Run Industrial Optimization", type="primary",
+                                        use_container_width=True, key="run_ind_opt",
+                                        disabled=len(selected_ind_vars) < 1)
+
+            with col_res2:
+                if run_ind_opt and selected_ind_vars:
+                    V_bed = st.session_state.ind_catalyst_mass / (
+                        st.session_state.ind_particle_density * (1 - st.session_state.bed_porosity))
+                    default_LD = 2.0
+                    D_default = (4 * V_bed / (np.pi * default_LD)) ** (1/3)
+                    L_default = default_LD * D_default
+
+                    base_cfg = {
+                        'diameter_m': D_default,
+                        'bed_height_m': L_default,
+                        'particle_diameter_m': st.session_state.ind_particle_size * 1e-6,
+                        'particle_density': st.session_state.ind_particle_density,
+                        'particle_porosity': st.session_state.particle_porosity,
+                        'tortuosity': st.session_state.tortuosity,
+                        'bed_porosity': st.session_state.bed_porosity,
+                        'catalyst_mass_kg': st.session_state.ind_catalyst_mass,
+                        'temperature_K': st.session_state.temperature + 273.15,
+                        'inlet_pressure_Pa': st.session_state.inlet_pressure * 1e5,
+                        'flow_rate_m3_s': st.session_state.ind_flow_rate / 60 / 1000,
+                        'inlet_mole_fractions': get_inlet_composition(),
+                        'pre_exponential': st.session_state.calibrated_A_value,
+                        'activation_energy': st.session_state.calibrated_Ea_value * 1000,
+                    }
+
+                    obj_fn = create_industrial_objective(rxn, base_cfg, selected_ind_vars, ind_objective)
+
+                    config = OptimizationConfig(
+                        variable_names=selected_ind_vars,
+                        bounds=[ind_bounds[v] for v in selected_ind_vars],
+                        n_iterations=ind_n_iter,
+                        n_initial_points=min(5, ind_n_iter // 3),
+                        maximize=(ind_objective != 'min_pressure_drop'),
+                    )
+
+                    valid, msg = config.validate()
+                    if not valid:
+                        st.error(msg)
+                    else:
+                        progress_bar2 = st.progress(0, text="Optimizing...")
+
+                        def ind_callback(iteration, params, value):
+                            progress_bar2.progress(iteration / ind_n_iter,
+                                text=f"Iteration {iteration}/{ind_n_iter}")
+
+                        optimizer = BayesianOptimizer(config)
+                        result = optimizer.optimize(obj_fn, callback=ind_callback)
+                        progress_bar2.progress(1.0, text="Complete!")
+
+                        st.session_state.ind_opt_result = result
+                        st.rerun()
+
+                if 'ind_opt_result' in st.session_state and st.session_state.ind_opt_result is not None:
+                    result = st.session_state.ind_opt_result
+
+                    st.markdown("### Optimization Results")
+                    st.success(result.message)
+
+                    st.markdown("#### Best Parameters")
+                    best_cols = st.columns(min(len(result.best_params), 4))
+                    for i, (name, val) in enumerate(result.best_params.items()):
+                        info = OPTIMIZATION_VARIABLES.get(name, {'display': name, 'unit': ''})
+                        best_cols[i % len(best_cols)].metric(info['display'], f"{val:.3g}")
+
+                    obj_label = OPTIMIZATION_OBJECTIVES.get(
+                        st.session_state.get('ind_opt_objective', 'product_percent'), 'Objective')
+                    best_val = result.best_value
+                    if st.session_state.get('ind_opt_objective') == 'min_pressure_drop':
+                        best_val = -best_val
+                    st.metric("Best Objective Value", f"{best_val:.4f}")
+
+                    # Convergence plot
+                    st.markdown("#### Convergence")
+                    fig_conv2, ax_conv2 = plt.subplots(1, 1, figsize=(10, 4))
+                    ax_conv2.plot(range(1, len(result.best_so_far)+1), result.best_so_far,
+                                  'b-o', markersize=4, linewidth=2, label='Best so far')
+                    ax_conv2.plot(range(1, len(result.convergence)+1), result.convergence,
+                                  'r.', alpha=0.4, markersize=6, label='Each trial')
+                    ax_conv2.set_xlabel('Iteration')
+                    ax_conv2.set_ylabel('Objective Value')
+                    ax_conv2.set_title('Bayesian Optimization Convergence')
+                    ax_conv2.legend()
+                    ax_conv2.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig_conv2)
+                    plt.close(fig_conv2)
+
+                    # Sensitivity analysis
+                    with st.expander("Sensitivity Analysis"):
+                        st.caption("Running one-at-a-time sensitivity sweep...")
+                        analyzer = SensitivityAnalyzer(
+                            result.variable_names,
+                            [ind_bounds[v] for v in result.variable_names]
+                        )
+
+                        best_obj_key = st.session_state.get('ind_opt_objective', 'product_percent')
+                        sens_obj_fn = create_industrial_objective(
+                            rxn, base_cfg, result.variable_names, best_obj_key)
+                        importance = analyzer.analyze(sens_obj_fn, n_samples=15)
+
+                        fig_sens, ax_sens = plt.subplots(1, 1, figsize=(10, 4))
+                        names = [OPTIMIZATION_VARIABLES.get(n, {'display': n})['display'] for n in importance.keys()]
+                        scores = list(importance.values())
+                        colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(scores)))
+                        ax_sens.barh(names, scores, color=colors)
+                        ax_sens.set_xlabel('Relative Importance')
+                        ax_sens.set_title('Parameter Sensitivity')
+                        ax_sens.grid(True, alpha=0.3, axis='x')
+                        plt.tight_layout()
+                        st.pyplot(fig_sens)
+                        plt.close(fig_sens)
+
+                    with st.expander("All Trials"):
+                        trial_data = []
+                        for i, trial in enumerate(result.all_trials):
+                            row = {'Trial': i+1}
+                            row.update(trial['params'])
+                            row['Objective'] = trial['value']
+                            trial_data.append(row)
+                        st.dataframe(pd.DataFrame(trial_data), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Select variables, set bounds, and click **Run Industrial Optimization**.")
+
+
+# ============================================================================
+# TAB 6: COMPARISON
+# ============================================================================
+with tabs[5]:
     st.header(f"Lab vs Industrial Comparison \u2014 {rxn.display_name}")
 
     if not st.session_state.calibration_done or st.session_state.industrial_results is None:
@@ -1168,9 +1508,9 @@ with tabs[4]:
 
 
 # ============================================================================
-# TAB 6: SETTINGS
+# TAB 7: SETTINGS
 # ============================================================================
-with tabs[5]:
+with tabs[6]:
     st.header("Current Settings")
 
     col1, col2 = st.columns(2)

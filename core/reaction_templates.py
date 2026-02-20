@@ -59,8 +59,8 @@ def _build_methane_decomposition() -> ReactionTemplate:
     )
     return ReactionTemplate(
         reaction=rxn,
-        default_A=5.0e4,
-        default_Ea=150000.0,
+        default_A=5.0e6,
+        default_Ea=160000.0,
         default_beta=0.0,
         default_kd=0.008,
         default_deact_order=1,
@@ -75,9 +75,9 @@ def _build_methane_decomposition() -> ReactionTemplate:
         default_lab_particle_density=2821.56,
         default_ind_flow_LPM=1960.0,
         default_ind_catalyst_mass_kg=57.0,
-        default_ind_particle_size_um=3000.0,
+        default_ind_particle_size_um=1000.0,
         default_ind_particle_density=2821.56,
-        default_ind_target_product_pct=30.0,
+        default_ind_target_product_pct=8.0,
         experimental_data=_METHANE_EXPERIMENTAL_DATA,
         description=(
             "Catalytic decomposition of methane over Ni-based catalyst. "
