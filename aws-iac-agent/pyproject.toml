@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iac-agent"
+version = "0.1.0"
+description = "AI agent that scans AWS and generates Terraform for unmanaged infrastructure"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.34",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+iac-agent = "iac_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"iac_agent.mapping" = ["tables/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

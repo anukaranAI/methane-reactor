@@ -1,0 +1,30 @@
+# Mapping from describer-native kinds to Terraform resource types and the
+# import-ID format each type expects (see the provider's import docs).
+# "{id}" and "{region}" render from the record; other placeholders render
+# from record.attributes.
+service: ec2
+kinds:
+  ec2.vpc:
+    terraform_type: aws_vpc
+    import_id: "{id}"
+  ec2.subnet:
+    terraform_type: aws_subnet
+    import_id: "{id}"
+  ec2.internet_gateway:
+    terraform_type: aws_internet_gateway
+    import_id: "{id}"
+  ec2.route_table:
+    terraform_type: aws_route_table
+    import_id: "{id}"
+  ec2.security_group:
+    terraform_type: aws_security_group
+    import_id: "{id}"
+  ec2.instance:
+    terraform_type: aws_instance
+    import_id: "{id}"
+  ec2.nat_gateway:
+    terraform_type: aws_nat_gateway
+    import_id: "{id}"
+  ec2.eip:
+    terraform_type: aws_eip
+    import_id: "{id}"
